@@ -59,14 +59,23 @@
 
 ## 1. 快速开始
 
-### 方式 A：一键脚本（推荐，在服务器上跑）
+### 方式 A：一键脚本（推荐，服务器上跑）
+
+**一行命令，不需要 git clone，也不需要先有代码：**
 
 ```bash
-cd tg-relay        # 代码目录（git clone 之后，或者手动传上去）
-bash install.sh    # 之后随时用 tgrelay 再进菜单
+bash <(curl -fsSL https://raw.githubusercontent.com/niuma1337sys/tg-relay/main/install.sh)
 ```
 
-打开的是中文菜单：
+脚本自己会去下载源码压缩包（地址写在脚本顶部 `DEFAULT_TARBALL`，换仓库只改那一行）。
+没有 `bash <(...)` 这种进程替换的环境，可以两步：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/niuma1337sys/tg-relay/main/install.sh -o install.sh
+bash install.sh
+```
+
+装完之后随时敲 **`tgrelay`** 再进菜单：
 
 ```
   tg-relay 1.0.0  ·  协议号频道 → 多群转发
@@ -87,22 +96,36 @@ bash install.sh    # 之后随时用 tgrelay 再进菜单
    0. 退出
 ```
 
-它按顺序做：装系统依赖 → 建虚拟环境 → **一步步问你**（api_id/api_hash 去哪拿、
+安装流程：装系统依赖 → 拿代码 → 建虚拟环境 → **一步步问你**（api_id/api_hash 去哪拿、
 源频道、目标群、运行模式、素材、群发送间隔、要不要面板和 Bot）→ 登录协议号 →
 装 systemd 服务 → 启动 → 自检 → 打印面板地址和 SSH 隧道命令。
 
-**全程不用手写 `config.yaml`。** 想改配置就再跑一次选「修改配置」——
-它会把**现有值读回来当默认值**，只改你要改的那一项，改完自动重启。
+**全程不用手写 `config.yaml`。** 改配置有两种方式：
+
+- 菜单选「2. 修改配置」—— 会把**现有值读回来当默认值**，只改你要改的那一项，改完自动重启
+- 或者直接 `bash install.sh reconfigure`（同样的流程，可脚本化）
 
 | 命令 | 作用 |
 | --- | --- |
 | `bash install.sh` | 打开菜单 |
 | `bash install.sh install` | 直接走安装流程 |
-| `bash install.sh status` | 看服务状态 + 配置摘要 + 最近日志 |
+| `bash install.sh reconfigure` | 重新配置（读回现有值当默认） |
+| `bash install.sh status` | 服务状态 + 配置摘要 + 最近日志 |
 | `bash install.sh account` | 账号自检（问一次 @SpamBot，看有没有被限制） |
 | `bash install.sh panel` | 打开文字面板（全屏，按 q 退出） |
 | `bash install.sh --dry-run` | 只打印会做什么，不落盘、不动服务 |
 | `bash install.sh --self-test` | 生成一份配置并用项目自己的解析器校验（不动线上） |
+| `bash install.sh --test-fetch [地址]` | 只测"下载源码包并解包"这一步 |
+
+**不想让脚本自己下载代码？** 三种方式都行，脚本会按顺序判断：
+
+1. 脚本就在一份代码里（clone 过、或手动传上去的）→ 直接用这份
+2. 设了 `TG_REPO=<git 地址>` → `git clone`
+3. 都没有 → 下载 `DEFAULT_TARBALL`（默认行为，也就是上面那条一行命令）
+
+其它可用的环境变量：`TG_TARBALL`（换压缩包地址）、`TG_PIP_MIRROR`（换 pip 源）、
+`TG_APP_DIR` / `TG_SERVICE`（换安装目录和服务名），以及 `TG_API_ID`、`TG_SOURCE`、
+`TG_TARGETS`、`TG_MODE`、`TG_MATERIALS`… 所有向导问题都能预先回答，便于无人值守安装。
 
 > **文字面板**（`--panel`）是**本机 API 的客户端**，不会新建 Telegram 连接 ——
 > 一个 session 只能被一个进程持有，面板自己去连会让账号被强制登出。

@@ -20,13 +20,25 @@
 #
 #  用法（在服务器上，root 身份）：
 #
-#      bash install.sh              # 打开管理菜单
+#      bash install.sh              # 打开管理菜单（装完之后也可以直接敲 tgrelay）
 #      bash install.sh install      # 直接走安装流程
+#      bash install.sh reconfigure  # 重新配置（读回现有值当默认，改完自动重启）
 #      bash install.sh status       # 看状态
 #      bash install.sh log          # 看日志
+#      bash install.sh account      # 账号自检（问 @SpamBot，看有没有被限制）
+#      bash install.sh panel        # 打开文字面板
 #      bash install.sh menu         # 菜单（同无参数）
 #      bash install.sh --dry-run    # 只打印会做什么，不落盘不改服务
 #      bash install.sh --self-test  # 自检：生成配置并用 Python 校验一遍（不动线上）
+#      bash install.sh --test-fetch [地址]   # 只测"下载源码包"这一步
+#
+#  一行命令安装（不需要 git clone，也不需要先有代码）：
+#
+#      bash <(curl -fsSL https://raw.githubusercontent.com/niuma1337sys/tg-relay/main/install.sh)
+#
+#      脚本会自己去下载源码压缩包（DEFAULT_TARBALL）。换仓库只改脚本顶部那两行。
+#      没有 curl 进程替换的环境（比如某些精简系统）可以：
+#          curl -fsSL <install.sh 地址> -o install.sh && bash install.sh
 #
 #  设计原则（都是踩过坑之后定的）：
 #
@@ -35,8 +47,9 @@
 #   3. **不碰 Telegram 会话**：脚本只负责装和配置；登录由本项目的 login.py 做，
 #      而且**一次只能有一个进程持有 session** —— 所以脚本绝不会在服务运行时
 #      去连 Telegram（账号自检走的是服务进程内的 API）。
-#   4. **非交互也能装**：所有问题都能用 TG_* 环境变量预先回答，
-#      便于自动化；没给变量才问人。
+#   4. **非交互也能装**：所有问题都能用 TG_* 环境变量预先回答，便于自动化。
+#   5. **代码自己拉**：不需要用户先 git clone —— 没找到本地代码就下载官方压缩包，
+#      给了 TG_REPO 才走 git。
 # =============================================================================
 
 set -u
@@ -55,6 +68,12 @@ SCRIPT_VERSION="1.0.0"
 # 依赖
 APT_PKGS="python3 python3-venv python3-pip git curl tar ca-certificates"
 PIP_MIRROR="${TG_PIP_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+
+# 源码地址（一行命令安装时用）。换仓库、换平台（比如 Gitee）只改这两行：
+#   GitHub 压缩包  https://codeload.github.com/<用户>/<仓库>/tar.gz/refs/heads/main
+#   Gitee 压缩包   https://gitee.com/<用户>/<仓库>/repository/archive/main.tar.gz
+DEFAULT_TARBALL="${TG_TARBALL:-https://codeload.github.com/niuma1337sys/tg-relay/tar.gz/refs/heads/main}"
+DEFAULT_SCRIPT_URL="${TG_SCRIPT_URL:-https://raw.githubusercontent.com/niuma1337sys/tg-relay/main/install.sh}"
 
 # 配置答案（都可用环境变量覆盖，便于无人值守安装）
 API_ID="${TG_API_ID:-}"
@@ -107,16 +126,15 @@ pause_any() {
 
 confirm() {
     # confirm "问题" [默认 y/n]
-    local question="$1" default="${2:-n}" answer
-    if [ ! -t 0 ]; then
-        [ "$default" = "y" ]
-        return
+    local question="$1" default="${2:-n}" answer=""
+    if [ -t 0 ]; then
+        if [ "$default" = "y" ]; then
+            printf '%s' "  ${C_YELLOW}?${C_OFF} ${question} [Y/n] " >&2
+        else
+            printf '%s' "  ${C_YELLOW}?${C_OFF} ${question} [y/N] " >&2
+        fi
     fi
-    if [ "$default" = "y" ]; then
-        printf '%s' "  ${C_YELLOW}?${C_OFF} ${question} [Y/n] "
-    else
-        printf '%s' "  ${C_YELLOW}?${C_OFF} ${question} [y/N] "
-    fi
+    # 同上：读不到才用默认值（</dev/null 时行为与以前一致）
     read -r answer || answer=""
     answer="${answer:-$default}"
     case "$answer" in [Yy]*) return 0 ;; *) return 1 ;; esac
@@ -124,26 +142,32 @@ confirm() {
 
 ask() {
     # ask "提示" "默认值"  -> echo 结果
-    local prompt="$1" default="${2:-}" answer
-    if [ ! -t 0 ]; then
-        printf '%s' "$default"
-        return
-    fi
-    if [ -n "$default" ]; then
-        printf '%s' "  ${C_YELLOW}?${C_OFF} ${prompt} ${C_DIM}[${default}]${C_OFF} " >&2
-    else
-        printf '%s' "  ${C_YELLOW}?${C_OFF} ${prompt} " >&2
+    #
+    # 注意这里**不能**在"stdin 不是终端"时直接返回默认值：
+    # 那样 `printf '2\n' | bash install.sh` 这种喂输入的用法会失效
+    # （第一版就是这么写的，结果管道里的选项被忽略、菜单直接退出）。
+    # 正确做法是照常读，读不到（EOF，比如 </dev/null）才用默认值。
+    local prompt="$1" default="${2:-}" answer=""
+    if [ -t 0 ]; then
+        if [ -n "$default" ]; then
+            printf '%s' "  ${C_YELLOW}?${C_OFF} ${prompt} ${C_DIM}[${default}]${C_OFF} " >&2
+        else
+            printf '%s' "  ${C_YELLOW}?${C_OFF} ${prompt} " >&2
+        fi
     fi
     read -r answer || answer=""
     printf '%s' "${answer:-$default}"
 }
 
 ask_secret() {
-    local prompt="$1" answer
-    if [ ! -t 0 ]; then return 0; fi
-    printf '%s' "  ${C_YELLOW}?${C_OFF} ${prompt} " >&2
-    read -rs answer || answer=""
-    printf '\n' >&2
+    local prompt="$1" answer=""
+    if [ -t 0 ]; then
+        printf '%s' "  ${C_YELLOW}?${C_OFF} ${prompt} " >&2
+        read -rs answer || answer=""
+        printf '\n' >&2
+    else
+        read -r answer || answer=""
+    fi
     printf '%s' "$answer"
 }
 
@@ -276,59 +300,95 @@ fetch_code() {
         return 0
     }
 
-    local mode=""
+    # 优先顺序：
+    #   1. 脚本自己就在一份代码里（git clone 过、或者手动传上去的）→ 直接复制
+    #   2. 给了 TG_REPO → git clone
+    #   3. **默认**：直接下载源码压缩包 —— 这就是"一行命令安装"该有的样子，
+    #      用户不需要先 clone 一次、也不需要懂 git
     if [ "$have_local" = yes ]; then
-        mode="local"
-    elif [ -n "$REPO_URL" ]; then
-        mode="git"
-    elif [ -t 0 ]; then
-        echo
-        info "没找到本地代码，选择获取方式："
-        echo "      1) 从 git 仓库克隆（需要仓库地址）"
-        echo "      2) 从压缩包安装（需要 tar.gz 直链）"
-        echo "      3) 我先手动把代码放到 ${APP_DIR}，跳过"
-        case "$(ask '选哪个？' 1)" in
-            1) mode="git" ;;
-            2) mode="tar" ;;
-            *) mode="skip" ;;
-        esac
-    else
-        die "没有本地代码，也没给 TG_REPO 地址"
+        copy_code "$src_dir"
+        return 0
     fi
 
-    case "$mode" in
-        local) copy_code "$src_dir" ;;
-        git)
-            [ -n "$REPO_URL" ] || REPO_URL="$(ask 'git 仓库地址（https 或 git@）' '')"
-            [ -n "$REPO_URL" ] || die "没给仓库地址"
-            if [ "$DRY_RUN" = yes ]; then
-                info "[dry-run] git clone $REPO_URL -> $APP_DIR"
-                return 0
-            fi
-            need_cmd git || die "没有 git，先装依赖"
-            git clone --depth 1 "$REPO_URL" "$APP_DIR" || die "克隆失败（私有仓库请用带令牌的 HTTPS 地址）"
-            ok "已克隆到 ${APP_DIR}"
+    local tar_url="${TG_TARBALL:-$DEFAULT_TARBALL}"
+    if [ -n "$REPO_URL" ]; then
+        clone_repo "$REPO_URL"
+        return 0
+    fi
+
+    info "本地不是代码目录，从 ${tar_url%%\?*} 下载源码…"
+    if download_code "$tar_url"; then
+        return 0
+    fi
+
+    # 下载失败才问人（非交互环境直接报错退出）
+    warn "自动下载失败。换一种方式："
+    if [ ! -t 0 ]; then
+        die "请设置 TG_TARBALL=<tar.gz 直链> 或 TG_REPO=<git 地址> 后重跑"
+    fi
+    echo "      1) 给我一个 tar.gz 直链"
+    echo "      2) 给我一个 git 仓库地址"
+    echo "      3) 我自己把代码放到 ${APP_DIR}，跳过"
+    case "$(ask '选哪个？' 1)" in
+        2)
+            REPO_URL="$(ask 'git 仓库地址' '')"
+            [ -n "$REPO_URL" ] || die "没给地址"
+            clone_repo "$REPO_URL"
             ;;
-        tar)
-            local url
-            url="$(ask 'tar.gz 直链' '')"
-            [ -n "$url" ] || die "没给地址"
-            if [ "$DRY_RUN" = yes ]; then
-                info "[dry-run] 下载 $url 解包到 $APP_DIR"
-                return 0
-            fi
-            mkdir -p "$APP_DIR"
-            curl -fsSL "$url" -o /tmp/tg-relay.tar.gz || die "下载失败"
-            tar -xzf /tmp/tg-relay.tar.gz -C "$APP_DIR" --strip-components=1 || die "解包失败"
-            rm -f /tmp/tg-relay.tar.gz
-            ok "已解包到 ${APP_DIR}"
-            ;;
-        skip)
+        3)
             if ! looks_like_project "$APP_DIR"; then
                 die "${APP_DIR} 里没看到 tgrelay/ 目录，先放好代码再重跑"
             fi
             ;;
+        *)
+            tar_url="$(ask 'tar.gz 直链' '')"
+            [ -n "$tar_url" ] || die "没给地址"
+            download_code "$tar_url" || die "下载/解包失败"
+            ;;
     esac
+}
+
+clone_repo() {
+    local url="$1"
+    if [ "$DRY_RUN" = yes ]; then
+        info "[dry-run] git clone $url -> $APP_DIR"
+        return 0
+    fi
+    need_cmd git || die "没有 git，先装依赖"
+    git clone --depth 1 "$url" "$APP_DIR" || die "克隆失败（私有仓库请用带令牌的 HTTPS 地址）"
+    ok "已克隆到 ${APP_DIR}"
+}
+
+download_code() {
+    local url="$1"
+    if [ "$DRY_RUN" = yes ]; then
+        info "[dry-run] 下载 ${url%%\?*} 并解包到 $APP_DIR"
+        return 0
+    fi
+    need_cmd curl || die "没有 curl，先装依赖"
+    local tmp
+    tmp="$(mktemp -d)"
+    if ! curl -fsSL --connect-timeout 15 --retry 2 "$url" -o "$tmp/src.tar.gz"; then
+        warn "下载失败：$url"
+        note "如果是 404：仓库可能不存在、或者对外不可见（被平台标记时会这样）"
+        note "如果是仓库地址：可以用 TG_REPO=<git 地址> 走 git clone"
+        rm -rf "$tmp"
+        return 1
+    fi
+    mkdir -p "$APP_DIR"
+    # GitHub / Gitee 的源码包都带一层顶层目录，--strip-components=1 去掉它
+    if ! tar -xzf "$tmp/src.tar.gz" -C "$APP_DIR" --strip-components=1 2>/dev/null; then
+        warn "解包失败（可能不是 tar.gz）"
+        rm -rf "$tmp"
+        return 1
+    fi
+    rm -rf "$tmp"
+    if ! looks_like_project "$APP_DIR"; then
+        warn "解包后没看到 tgrelay/ 目录 —— 压缩包内容不对？"
+        return 1
+    fi
+    ok "已下载并解包到 ${APP_DIR}"
+    return 0
 }
 
 copy_code() {
@@ -687,17 +747,24 @@ build_exec_flags() {
     esac
     [ "$WEB" = "yes" ] && flags="$flags --web --web-host 127.0.0.1 --web-port ${WEB_PORT}"
     [ "$BOT" = "yes" ] && flags="$flags --bot"
-    printf '%s' "$flags"
+    # 去掉可能的前导空格；调用方负责用空格把它和 `-m tgrelay` 拼起来
+    printf '%s' "${flags# }"
 }
 
 write_service() {
     title "安装 systemd 服务"
-    local flags
+    local flags exec_args
     flags="$(build_exec_flags)"
+    # ★ 这里必须显式加空格。第一版写成 `-m tgrelay${flags}`，
+    # 生成出来是 `tgrelay--repost-only`，服务报
+    # "No module named tgrelay--repost-only" 直接起不来 ——
+    # 而且是在"修改配置"时把人家原本好好的 unit 写坏，非常阴险。
+    exec_args="-m tgrelay"
+    [ -n "$flags" ] && exec_args="${exec_args} ${flags}"
 
     if [ "$DRY_RUN" = yes ]; then
         info "[dry-run] 写 ${SERVICE_FILE}"
-        note "ExecStart=${APP_DIR}/.venv/bin/python -m tgrelay${flags}"
+        note "ExecStart=${APP_DIR}/.venv/bin/python ${exec_args}"
         return 0
     fi
 
@@ -715,7 +782,7 @@ WorkingDirectory=${APP_DIR}
 # 所以这里必须 EnvironmentFile（应用自己也会读 .env，但那是另一条路径）
 EnvironmentFile=-${APP_DIR}/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=${APP_DIR}/.venv/bin/python -m tgrelay${flags}
+ExecStart=${APP_DIR}/.venv/bin/python ${exec_args}
 Restart=always
 RestartSec=15
 # 优雅退出：程序自己会冲刷相册缓冲、停 worker
@@ -987,7 +1054,19 @@ uninstall_app() {
 install_command() {
     [ "$DRY_RUN" = yes ] && return 0
     mkdir -p "$(dirname "$SELF_COPY")"
-    cp -f "${BASH_SOURCE[0]}" "$SELF_COPY" 2>/dev/null || return 0
+
+    local src="${BASH_SOURCE[0]:-}"
+    if [ -n "$src" ] && [ -f "$src" ]; then
+        cp -f "$src" "$SELF_COPY" 2>/dev/null || return 0
+    else
+        # `bash <(curl ...)` 或 `curl ... | bash`：脚本自己没有实体文件，
+        # 得从默认地址再下一份，否则菜单里的 tgrelay 命令没东西可执行
+        if ! curl -fsSL "$DEFAULT_SCRIPT_URL" -o "$SELF_COPY" 2>/dev/null; then
+            warn "没能把安装脚本自己存下来，tgrelay 命令不可用（其它功能正常）"
+            warn "想保留菜单命令，可以手动：curl -fsSL $DEFAULT_SCRIPT_URL -o $SELF_COPY"
+            return 0
+        fi
+    fi
     chmod +x "$SELF_COPY"
     cat > "$CMD_LINK" <<EOF
 #!/usr/bin/env bash
@@ -1033,8 +1112,35 @@ do_install() {
     print_summary
 }
 
-self_test() {
+test_fetch() {
+    # 只测"下载源码包并解包"这一步，不动系统、不装服务。
+    # 用途：换了仓库/换到 Gitee 之后，先确认那个直链是好的，
+    # 而不是等到装到一半才发现 404。
+    local url="${1:-$DEFAULT_TARBALL}"
+    local tmp
+    tmp="$(mktemp -d)"
+    APP_DIR="$tmp/app"
+    DRY_RUN=no
+
     banner
+    title "测试源码下载"
+    info "地址：$url"
+    echo
+    if download_code "$url"; then
+        echo
+        ok "这个地址可用。解包后的目录："
+        ls "$APP_DIR" | head -10 | sed 's/^/    /'
+        local rc=0
+    else
+        echo
+        err "这个地址不可用（看上面的提示）"
+        local rc=1
+    fi
+    rm -rf "$tmp"
+    return $rc
+}
+
+self_test() {
     title "自检：生成配置并用 Python 校验"
     # 用**脚本所在目录**当项目目录，而不是 $APP_DIR：
     # self-test 要拿"当前这份代码"的解析器去校验生成的配置。
@@ -1089,12 +1195,33 @@ PY
     return $rc
 }
 
-read_current_settings() {
-    """把线上现有配置读回来当默认值。
+do_reconfigure() {
+    # 重新走一遍配置向导 + 重写 .env / config.yaml / unit + 重启。
+    # 抽成独立函数是为了能当子命令用：`bash install.sh reconfigure`
+    # （否则只能进交互菜单点第 2 项，没法脚本化，我自己测都没法测）。
+    require_root
+    if ! systemctl cat "$SERVICE" >/dev/null 2>&1; then
+        warn "还没安装（找不到 ${SERVICE}.service）—— 先选 1 安装"
+        return 1
+    fi
+    read_current_settings
+    if [ -f "$APP_DIR/.env" ]; then
+        API_ID="$(grep -oP 'TG_API_ID=\K.*'     "$APP_DIR/.env" | tr -d '"' || true)"
+        API_HASH="$(grep -oP 'TG_API_HASH=\K.*' "$APP_DIR/.env" | tr -d '"' || true)"
+    fi
+    guided_config
+    write_env_file
+    write_config_file
+    write_service
+    start_service
+    return 0
+}
 
-    不这么做的话，「修改配置」每次都要从零重填一遍 —— 改一个间隔要重答七八个问题，
-    很容易手滑把源频道写错。
-    """
+read_current_settings() {
+    # 把线上现有配置读回来当默认值。
+    #
+    # 不这么做的话，「修改配置」每次都要从零重填一遍 —— 改一个间隔要重答七八个问题，
+    # 很容易手滑把源频道写错。
     local py="$APP_DIR/.venv/bin/python"
     [ -x "$py" ] || py="python3"
 
@@ -1200,24 +1327,7 @@ menu() {
         case "$(ask '请输入选项' 0)" in
             1) do_install ;;
             2)
-                require_root
-                if ! systemctl cat "$SERVICE" >/dev/null 2>&1; then
-                    warn "还没安装"; pause_any; continue
-                fi
-                # 先读回当前值当默认值，再走向导（否则改一个数要重填全部）
-                read_current_settings
-                if [ -f "$APP_DIR/.env" ]; then
-                    API_ID="$(grep -oP 'TG_API_ID=\K.*'   "$APP_DIR/.env" | tr -d '"' || true)"
-                    API_HASH="$(grep -oP 'TG_API_HASH=\K.*' "$APP_DIR/.env" | tr -d '"' || true)"
-                    WEB_TOKEN="$(grep -oP 'TG_WEB_TOKEN=\K.*' "$APP_DIR/.env" | tr -d '"' || true)"
-                    BOT_TOKEN="$(grep -oP 'TG_BOT_TOKEN=\K.*' "$APP_DIR/.env" | tr -d '"' || true)"
-                    BOT_ADMINS="$(grep -oP 'TG_BOT_ADMINS=\K.*' "$APP_DIR/.env" | tr -d '"' || true)"
-                fi
-                guided_config
-                write_env_file
-                write_config_file
-                write_service
-                start_service
+                do_reconfigure
                 ;;
             3) show_status ;;
             4) show_logs ;;
@@ -1238,6 +1348,7 @@ menu() {
 
 case "${1:-menu}" in
     install)    do_install ;;
+    reconfigure|config) do_reconfigure ;;
     menu)       menu ;;
     status)     show_status ;;
     log|logs)   show_logs ;;
@@ -1245,6 +1356,7 @@ case "${1:-menu}" in
     panel)      open_panel ;;
     uninstall)  require_root; uninstall_app ;;
     --self-test|self-test) self_test ;;
+    --test-fetch|test-fetch) shift; test_fetch "${1:-}" ;;
     --dry-run)  do_install ;;
     -h|--help|help)
         sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
