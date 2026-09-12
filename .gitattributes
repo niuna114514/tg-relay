@@ -1,0 +1,11 @@
+# 一律用 LF：这些代码最终跑在 Linux 上，shell 脚本带 CRLF 会直接报错
+* text=auto eol=lf
+
+# 二进制不要碰
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.session binary
+*.db binary
+*.sqlite binary
