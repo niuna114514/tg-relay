@@ -53,6 +53,14 @@ jobs:
           done
           exit $missing
 
+      - name: 一键安装脚本的语法与自检
+        # bash -n 挡语法错误；--self-test 会真的生成一份 config.yaml
+        # 并用项目自己的解析器校验（顺带挡住 YAML 里 @ 没加引号这类坑）
+        run: |
+          bash -n install.sh
+          pip install -r requirements.txt
+          bash install.sh --self-test
+
       - name: 检查没有混进凭据
         # 只查常见形状，真正的把关还是在 .gitignore 和人的自觉。
         # 忽略项说明：
