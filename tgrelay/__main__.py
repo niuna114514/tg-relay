@@ -129,6 +129,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="BotFather 给的 bot token（也可用 TG_BOT_TOKEN 环境变量）",
     )
     parser.add_argument("--log-level", default=None, help="覆盖日志级别")
+    parser.add_argument(
+        "--panel",
+        action="store_true",
+        help="在 SSH 里打开文字面板（★ 不连接 Telegram，只读本机 API / SQLite）",
+    )
+    parser.add_argument(
+        "--service",
+        default="tg-relay",
+        help="systemd 服务名：面板用它查服务状态、并从 ExecStart 里推断面板端口",
+    )
     return parser
 
 
@@ -710,6 +720,16 @@ def _install_signal_handlers(stop: asyncio.Event) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # ★ 文字面板必须在**创建 TelegramClient 之前**分流出去。
+    # 服务进程已经是 relay.session 的唯一持有者；面板要是也去连一次，
+    # auth key 会作废、账号被强制登出（这个项目最大的红线）。
+    # 面板只读本机面板 API 和 SQLite，一行 Telegram 代码都不碰。
+    if getattr(args, "panel", False):
+        from .panel import main as panel_main
+
+        return panel_main(args)
+
     try:
         return asyncio.run(run(args))
     except ConfigError as exc:
