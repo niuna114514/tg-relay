@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔐 安全漏洞
+    url: https://github.com/niuma1337sys/telegram-/security/advisories/new
+    about: 请不要开公开 Issue。会话文件、凭据泄漏这类问题请走私密报告。
+  - name: 📖 遇到问题先看文档
+    url: https://github.com/niuma1337sys/telegram-/blob/main/README.md
+    about: 常见问题（号被封、慢速模式、间隔怎么算、配额语义）在 README 第 9 节。
+  - name: 🔧 部署与运维
+    url: https://github.com/niuma1337sys/telegram-/blob/main/MAINTENANCE.md
+    about: 服务器上线、备份恢复、巡检、升级流程都在运维手册里。

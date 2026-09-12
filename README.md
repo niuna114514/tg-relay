@@ -1,16 +1,34 @@
 # 协议号 频道 → 多群 转发（保留来源）
 
+[![CI](https://github.com/niuma1337sys/telegram-/actions/workflows/ci.yml/badge.svg)](https://github.com/niuma1337sys/telegram-/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/tests-347-brightgreen.svg)](#-跑测试)
+
 用 **MTProto 协议号**（Telethon 用户号，不是 Bot）监听一个频道，把新消息转发到多个群。
 采用 **forward 模式**：保留"转发自 XXX 频道"的来源标记，**不下载、不重传**，几乎不占带宽。
+
+还能把**固定几条消息**长期反复发到多个群（定时重发），带网页面板和 Telegram 操控 Bot。
 
 > ## ⚠️ 先读免责声明
 >
 > 1. **本工具用协议号（用户账号）群发消息。** Telegram 对用户号群发、重复发送相同内容
 >    有明确的反垃圾策略，**使用不当会导致账号被限制或封禁**。作者不对账号损失负责。
+>    仓库里的 [`tgrelay/risk.py`](tgrelay/risk.py) 会在你配上危险节奏时主动警告，
+>    但那只是提示，不是免死金牌。
 > 2. **你要对转发的内容负责**：确保有权在目标群发布、内容不违反 Telegram 条款和你所在地区法律、
 >    不用于垃圾信息/诈骗/侵权。
 > 3. **默认配置是保守的**（间隔 3~6 秒、每分钟 20 条、每日 200 条），第一次别急着调高。
 > 4. 按 **AGPL-3.0** 提供，**不附带任何担保**。详见文末。
+
+## 目录
+
+- [这个项目解决什么问题](#这个项目解决什么问题)
+- [1. 快速开始](#1-快速开始) · [2. 配置说明](#2-配置说明configyaml) · [3. 运行行为](#3-运行行为踩过的坑都在这里) · [4. 上线节奏](#4-上线节奏重要)
+- [5. 常用命令](#5-常用命令) · [6. 目录结构](#6-目录结构) · [7. 慢速模式](#7-目标群开了慢速模式怎么配) · [8. 定时重发](#8-定时重发把固定几条消息反复发到群里)
+- [9. 常见问题](#9-常见问题)（号被封怎么办、怎么查账号被限制、能不能加账号…）
+- [10. 许可证与免责声明](#10-许可证与免责声明)
+- [🚀 跑测试](#-跑测试) · [🤝 参与贡献](#-参与贡献) · [📋 变更日志](CHANGELOG.md) · [🔐 安全策略](SECURITY.md) · [🔧 运维手册](MAINTENANCE.md)
 
 ## 这个项目解决什么问题
 
@@ -389,4 +407,36 @@ python -m tgrelay --probe-send       # 真发一条，看 Telegram 收不收（�
 - 如果你要把它做成对外服务（别人用你的号），**当前架构不支持**；
   而且按 AGPL 第 13 条**你必须向使用者提供你修改后的源码**，
   内容合规、账号风险、法律责任全部由运营方承担。
+
+---
+
+## 🚀 跑测试
+
+```bash
+pip install -r requirements.txt
+python -m pytest                    # 347 个用例，全部不依赖网络
+python -m pytest -k write_forbidden # 按关键字挑
+```
+
+测试用 `tests/helpers.py` 里的**假客户端**，不需要 `api_id`、不需要登录、
+不会碰真实 Telegram —— CI 里跑的也是这些。新增测试请保持这一点。
+
+## 🤝 参与贡献
+
+欢迎提 Issue 和 PR，动手前请先看 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+两条最要紧的：
+
+1. **不要提交任何真实凭据**（`.env`、`*.session`、面板令牌，以及真实的频道名/群名）。
+   会话文件**等价于账号密码**。
+2. **改动涉及发送行为**（限速、配额、重试、风控）请在 PR 里说明影响 ——
+   这类改动一旦出错，代价是账号被限制或封禁。
+
+- 📋 [变更日志](CHANGELOG.md)
+- 🔐 [安全策略](SECURITY.md)（漏洞请走私密报告，不要开公开 Issue）
+- 🔧 [运维手册](MAINTENANCE.md)（部署、备份恢复、巡检、故障处置）
+
+## ⭐ 相关
+
+- [Telethon](https://github.com/LonamiWebs/Telethon) —— 本项目依赖的 MTProto 客户端库
+- [FastAPI](https://github.com/fastapi/fastapi) —— 网页面板
 

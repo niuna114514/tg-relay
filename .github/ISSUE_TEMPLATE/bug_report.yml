@@ -1,0 +1,87 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ **提交前请确认：这个 Issue 里没有任何真实凭据。**
+
+        不要粘贴 `.env` 的内容、`*.session` 文件、bot token、面板令牌，
+        也不要粘贴真实的频道名/群名（用 `@your_channel` 代替）。
+        截图请先打码。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 现象是什么？和你期望的有什么不同？
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 怎么复现
+      description: 越具体越好。配置里关键的那几行（去掉真实名字）、执行的命令、触发的时间点。
+      placeholder: |
+        1. config.yaml 里 interval 设为 …
+        2. 执行 python -m tgrelay --repost-only
+        3. 大约 5 分钟后…
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: |
+        `journalctl -u tg-relay -n 100` 或者 `data/tgrelay.log` 里的相关片段。
+        **请去掉频道名/群名和任何 ID。**
+      render: text
+    validations:
+      required: false
+
+  - type: dropdown
+    id: account-state
+    attributes:
+      label: 账号当时的状态
+      description: |
+        如果是"发不出去"类的问题，这一项非常关键 ——
+        **群权限显示正常但账号被 Telegram 限制**是最常见、也最容易误判的情况。
+        用 `python -m tgrelay --check-account` 可以查（会问一次 @SpamBot）。
+      options:
+        - 不确定 / 没查过
+        - 一切正常（@SpamBot 说没有限制）
+        - 账号被 Telegram 限制了（@SpamBot 明确说 limited）
+        - 只是某一个群不行，其它群正常
+        - 会话失效了（提示要重新登录）
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / 提交
+      placeholder: "1.0.0 或 git rev-parse --short HEAD 的结果"
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 运行环境
+      placeholder: "Debian 11 / 1 vCPU 1GB / Python 3.12.14 / telethon 1.45.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 已经试过什么
+      description: |
+        比如：改过哪个参数、看过哪些日志、`--check` / `--probe-send` 的结果。
+        这能省很多来回。
+    validations:
+      required: false
