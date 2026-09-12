@@ -545,21 +545,17 @@ def render(state: PanelState, *, width: int = 100, height: int = 30, selected: i
 # --------------------------------------------------------------------------
 
 
-def _discover_token(explicit: str | None, project_dir: Path, service: str = "tg-relay") -> str:
-    """按优先级找面板令牌。
-
-    顺序：参数 > 环境变量 > systemd（含 drop-in）> 项目目录的 .env。
+def _discover_env(name: str, service: str = "tg-relay", project_dir: Path | None = None) -> str:
+    """从 环境变量 / systemd（含 drop-in）/ 项目 .env 里找一个变量。
 
     为什么必须查 systemd：真实部署里令牌经常是放在
-    `/etc/systemd/system/<service>.service.d/*.conf` 里的（部署时用 drop-in
-    注入密钥是常见做法），`.env` 里反而没有。只查 .env 会得出
-    "没有面板令牌"的错误结论，把能用的一键管理脚本变成残废（真踩过）。
+    `/etc/systemd/system/<service>.service.d/*.conf` 里的（用 drop-in 注入密钥
+    很常见），`.env` 里反而没有。只查 .env 会得出"没有令牌"的错误结论
+    （真踩过：一键管理脚本的账号自检因此一直说"没找到面板令牌"）。
     """
-    if explicit:
-        return explicit.strip()
-    env = (os.environ.get("TG_WEB_TOKEN") or "").strip()
-    if env:
-        return env
+    value = (os.environ.get(name) or "").strip()
+    if value:
+        return value
 
     # systemd drop-in（按服务名找）
     for conf in sorted(Path("/etc/systemd/system").glob(f"{service}.service.d/*.conf")):
@@ -567,29 +563,38 @@ def _discover_token(explicit: str | None, project_dir: Path, service: str = "tg-
             text = conf.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for match in re.finditer(r"TG_WEB_TOKEN=([^\s\"']+)", text):
+        match = re.search(rf"{name}=([^\s\"']+)", text)
+        if match:
             return match.group(1).strip('"')
 
-    # systemd 合并后的环境（覆盖 Environment= 写在主 unit 里的情况）
+    # systemd 合并后的环境（覆盖 Environment= 直接写在主 unit 里的情况）
     if shutil.which("systemctl"):
         try:
             text = subprocess.run(
                 ["systemctl", "show", "-p", "Environment", "--value", service],
                 capture_output=True, text=True, timeout=5,
             ).stdout
-            match = re.search(r"TG_WEB_TOKEN=([^\s\"']+)", text)
+            match = re.search(rf"{name}=([^\s\"']+)", text)
             if match:
                 return match.group(1).strip('"')
         except Exception:
             pass
 
-    env_file = project_dir / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if line.startswith("TG_WEB_TOKEN="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    if project_dir is not None:
+        env_file = project_dir / ".env"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if line.startswith(f"{name}="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
     return ""
+
+
+def _discover_token(explicit: str | None, project_dir: Path, service: str = "tg-relay") -> str:
+    """面板令牌：参数 > 环境变量 > systemd > .env。"""
+    if explicit and explicit.strip():
+        return explicit.strip()
+    return _discover_env("TG_WEB_TOKEN", service, project_dir)
 
 
 def _discover_port(explicit: int | None, service: str = "tg-relay") -> int:

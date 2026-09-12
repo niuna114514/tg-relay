@@ -1110,6 +1110,7 @@ read_current_settings() {
 
     local out
     out="$( cd "$APP_DIR" && "$py" - <<'PY' 2>/dev/null
+from pathlib import Path
 from tgrelay.config import load_config
 c = load_config("config.yaml")
 print("SOURCE=" + (str(c.sources[0]) if c.sources else ""))
@@ -1128,6 +1129,27 @@ print("DAILY_LIMIT=" + str(int(r.daily_limit)))
 print("PREMIUM=" + ("yes" if c.premium else "no"))
 PY
     )"
+
+    # 令牌也一起读回来：真实部署里它们常在 systemd 的 drop-in 里而不在 .env，
+    # 不读回来的话「修改配置」按回车会把 .env 里的令牌清空。
+    local saved_tokens
+    saved_tokens="$( cd "$APP_DIR" && "$py" - "$SERVICE" <<'PY' 2>/dev/null
+import sys
+from pathlib import Path
+from tgrelay.panel import _discover_env
+svc = sys.argv[1]
+for name in ("TG_WEB_TOKEN", "TG_BOT_TOKEN", "TG_BOT_ADMINS"):
+    print(name + "=" + _discover_env(name, svc, Path(".")))
+PY
+    )"
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            TG_WEB_TOKEN=*)  WEB_TOKEN="${line#TG_WEB_TOKEN=}" ;;
+            TG_BOT_TOKEN=*)  BOT_TOKEN="${line#TG_BOT_TOKEN=}" ;;
+            TG_BOT_ADMINS=*) BOT_ADMINS="${line#TG_BOT_ADMINS=}" ;;
+        esac
+    done <<< "$saved_tokens"
 
     local key value
     while IFS='=' read -r key value; do
