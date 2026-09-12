@@ -1,0 +1,21 @@
+# 运行时数据与私有文件 —— 绝对不要提交
+data/
+*.session
+*.session-journal
+*.log
+logs/
+
+# 凭据
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 部署相关（只在你自己的机器上存在）
+.deploy.json
+DEPLOYED.md
+SCENARIOS.md
