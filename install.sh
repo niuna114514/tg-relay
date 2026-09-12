@@ -1148,6 +1148,28 @@ self_test() {
     # 整个自检假红（第一次把它加进 CI 就是这样）。
     local project_dir
     project_dir="$(script_dir)"
+
+    # 一行命令（bash <(curl ...)）跑的时候脚本没有实体文件，
+    # script_dir() 会落到 /dev/fd，那里既没有 tgrelay/ 也没法 cd。
+    # 这种情况先把源码拉一份下来再校验 —— 顺带把
+    # 「脚本地址 → 源码包地址 → 配置生成 → 解析」整条链都验证了。
+    local downloaded=""
+    if ! looks_like_project "$project_dir"; then
+        note "脚本没有实体项目目录（一行命令跑的场景），先下载源码用于校验…"
+        downloaded="$(mktemp -d)"
+        local saved_app="$APP_DIR"
+        APP_DIR="$downloaded"
+        if ! download_code "$DEFAULT_TARBALL"; then
+            APP_DIR="$saved_app"
+            rm -rf "$downloaded"
+            err "源码下载失败，没法校验生成出来的配置"
+            return 1
+        fi
+        APP_DIR="$saved_app"
+        project_dir="$downloaded"
+        ok "已用下载到的源码做校验"
+    fi
+
     local tmp
     tmp="$(mktemp -d)"
     APP_DIR="$tmp"
@@ -1192,6 +1214,7 @@ PY
     )
     local rc=$?
     rm -rf "$tmp"
+    [ -n "$downloaded" ] && rm -rf "$downloaded"
     return $rc
 }
 
