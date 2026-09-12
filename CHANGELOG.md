@@ -82,4 +82,4 @@
 - 备份包用 GPG AES256 加密，口令单独存放
 
 [未发布]: https://github.com/niuma1337sys/telegram-/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/niuma1337sys/telegram-/releases/tag/v1.0.0
+[1.0.0]: https://github.com/niuma1337sys/telegram-/tree/v1.0.0
