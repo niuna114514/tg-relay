@@ -54,14 +54,18 @@ jobs:
           exit $missing
 
       - name: 检查没有混进凭据
-        # 只查常见形状，真正的把关还是在 .gitignore 和人的自觉
+        # 只查常见形状，真正的把关还是在 .gitignore 和人的自觉。
+        # 忽略项说明：
+        #   your_ / <你的      —— 文档里的占位符
+        #   0123456789abcdef   —— .env.example 里那个约定俗成的假 api_hash
+        # 不忽略的话，这个检查会在模板文件上直接误报（第一次跑就踩到了）。
         run: |
           set +e
           hits=$(grep -rnE \
             -e '[0-9]{8,12}:[A-Za-z0-9_-]{30,}' \
             -e '(api_hash|API_HASH)[[:space:]]*=[[:space:]]*[0-9a-f]{32}' \
             --include='*.py' --include='*.yaml' --include='*.md' --include='*.example' . \
-            | grep -v 'your_\|<你的' || true)
+            | grep -vE 'your_|<你的|0123456789abcdef' || true)
           if [ -n "$hits" ]; then
             echo "疑似凭据："; echo "$hits"; exit 1
           fi
