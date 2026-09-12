@@ -185,6 +185,16 @@ def check_activity(report: Report, config: object) -> None:
         repost_enabled = bool(getattr(repost, "enabled", False))
         interval = getattr(repost, "interval", None) or 300
 
+        # 近 24 小时有没有**任何**发送动作（不管成功失败）。
+        # 用来区分"重发被关掉了（预期安静）"和"程序卡死了（该报警）"。
+        attempts_row = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM deliveries
+            WHERE updated_at >= datetime('now', '-1 day')
+            """
+        ).fetchone()
+        attempts_24h = int(attempts_row["n"]) if attempts_row else 0
+
         if last_ok is None:
             report.add(WARN, "发送记录", "数据库里还没有任何成功发送记录")
         else:
@@ -209,6 +219,17 @@ def check_activity(report: Report, config: object) -> None:
                     )
                 else:
                     report.add(0, "发送活跃", f"最近一次成功发送在 {hours:.2f} 小时前")
+            elif attempts_24h == 0:
+                # 重发关着 + 近 24 小时一次都没试过 = **人主动停的**
+                # （账号被限制、在等申诉解除）。这是预期状态，只报信息。
+                # 不加这个分支的话，停发超过 24 小时就会天天收到"发送停滞"的误报，
+                # 把真正的告警淹掉。
+                report.add(
+                    0,
+                    "发送记录",
+                    f"重发已关闭，近 24 小时没有发送动作（预期）；"
+                    f"上次成功发送在 {hours:.1f} 小时前",
+                )
             elif hours > 24:
                 report.add(WARN, "发送记录", f"最近一次成功发送在 {hours:.1f} 小时前")
 
@@ -618,12 +639,24 @@ async def run(args: argparse.Namespace) -> int:
         verdict = {0: "✅ 一切正常", WARN: "⚠️ 有告警，建议处理", CRIT: "❌ 有严重问题"}[report.worst]
         print(f"结论：{verdict}（{len(report.problems())} 个问题）")
 
-    if args.notify and report.worst > 0:
+    # 什么级别才值得推一条到手机上：
+    #   正常情况：有 WARN 就推（黄灯），有 CRIT 更要推。
+    #   重发关着的时候（账号被限制、在等申诉，见 MAINTENANCE 3.2.1）：
+    #     只推 CRIT。因为"停发"会让昨天的失败率/跳过率/额度浪费在 24 小时窗口里
+    #     残留十几个小时，每 15 分钟推一次的黄灯纯属噪音，会把真正的报警淹掉。
+    #     服务挂了、磁盘满、证书过期这些仍然是 CRIT，照样会叫人。
+    notify_from = WARN
+    if config is not None and not bool(getattr(getattr(config, "repost", None), "enabled", False)):
+        notify_from = CRIT
+    if args.notify and report.worst >= notify_from:
         lines = ["<b>⚠️ tg-relay 健康检查报警</b>"]
         for finding in report.problems():
+            if finding.level < notify_from:
+                continue
             icon = "🔴" if finding.level == CRIT else "🟡"
             lines.append(f"{icon} <b>{finding.title}</b>\n{finding.detail}")
-        notify_bot("\n\n".join(lines))
+        if len(lines) > 1:
+            notify_bot("\n\n".join(lines))
 
     return report.worst
 

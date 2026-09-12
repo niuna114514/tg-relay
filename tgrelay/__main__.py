@@ -435,10 +435,13 @@ async def run(args: argparse.Namespace) -> int:
                 )
 
         stats_task = asyncio.create_task(_stats_loop(engine, store, stop_event, reposter))
+        # 注意用 reposter.running 而不是 reposter 是不是 None ——
+        # Reposter 现在总是会构造出来（面板要能随时启动它），
+        # 拿对象在不在判断会打出"定时重发已开启"这种自相矛盾的话。
         log.info(
             "开始监听 %s%s（Ctrl+C 退出）",
             "、".join(str(item) for item in config.sources),
-            "；定时重发已开启" if reposter else "",
+            "；定时重发运行中" if reposter is not None and reposter.running else "；定时重发未运行",
         )
 
         listen_task = asyncio.create_task(client.run_until_disconnected())
