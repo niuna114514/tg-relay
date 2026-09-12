@@ -55,7 +55,12 @@ repost:
 
 
 class PermClient(FakeClient):
-    """可发言、无慢速的假客户端（供 add_target 的校验用）。"""
+    """可发言、无慢速的假客户端（供 add_target 的校验用）。
+
+    `default_banned_rights` 的 flag 是**反的**：True = 禁止。
+    这里全部 False 表示"普通开放群"，也就是这个号能往里发东西。
+    （早期全写成 True，等于"文字/媒体/图片全禁"，判定自然变成不能发。）
+    """
 
     def __init__(self, slowmode: int = 0) -> None:
         super().__init__()
@@ -69,7 +74,10 @@ class PermClient(FakeClient):
             id=-1003003,
             title="新群",
             default_banned_rights=SimpleNamespace(
-                send_messages=True, send_plain=True, send_media=True, send_photos=True
+                send_messages=False,
+                send_plain=False,
+                send_media=False,
+                send_photos=False,
             ),
             slowmode_seconds=self._slowmode or None,
         )
@@ -382,6 +390,105 @@ def test_run_repost_once(wired) -> None:
     data = http.post("/api/repost/run", headers=auth).json()
     assert data["sent"] >= 0
     assert "stats" in data
+
+
+# --------------------------------------------------------------------------
+# 停止 / 启动重发必须是一对可逆操作
+#
+# 2026-09-12 事故：账号被 Telegram 限制后需要"停掉重发等申诉"，
+# 但当时的面板只能停不能开，停了就只能重启进程。这几个测试锁死可逆性。
+# --------------------------------------------------------------------------
+
+
+def test_stop_repost_disables_and_persists(wired) -> None:
+    http, control, config_path, *_ = wired
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    data = http.post("/api/repost/stop", headers=auth).json()
+
+    assert data["stopping"] is True
+    assert data["enabled"] is False
+    assert control.config.repost.enabled is False
+    # 必须落盘：否则服务器一重启，自己又开始往被限制的号上发
+    assert "enabled: false" in config_path.read_text(encoding="utf-8")
+
+
+def test_start_repost_is_the_inverse_of_stop(wired) -> None:
+    http, control, config_path, *_ = wired
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+
+    http.post("/api/repost/stop", headers=auth)
+    assert control.reposter.running is False
+
+    data = http.post("/api/repost/start", headers=auth).json()
+
+    assert data["started"] is True
+    assert data["enabled"] is True
+    assert control.config.repost.enabled is True
+    assert control.reposter.running is True, "停止之后必须还能启动回来"
+    assert "enabled: true" in config_path.read_text(encoding="utf-8")
+
+    control.reposter._stop.set()
+
+
+def test_start_repost_clears_breaker_and_blocks(wired) -> None:
+    """人主动点「启动重发」= 已经处理过账号问题，顺手松开刹车。"""
+    http, control, *_ = wired
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+
+    control.sender.breaker.trip("测试熔断")
+    control.sender.write_forbidden.note("-1002001")
+
+    http.post("/api/repost/start", headers=auth)
+
+    assert control.sender.breaker.tripped is False
+    assert control.sender.write_forbidden.blocked_targets() == {}
+    control.reposter._stop.set()
+
+
+def test_stats_expose_account_section(wired) -> None:
+    """账号状态要能在面板上看到：熔断原因、被停发的目标、最近告警。"""
+    http, control, *_ = wired
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    control.sender.breaker.trip("多个目标报禁止发言")
+    control.sender.write_forbidden.note("-1002001")
+
+    data = http.get("/api/stats", headers=auth).json()
+
+    assert data["account"]["breaker"]
+    assert "-1002001" in data["account"]["write_forbidden"]
+
+
+def test_account_check_reports_limited(wired) -> None:
+    """账号自检：@SpamBot 说被限制时如实回报，并且说清该干什么。"""
+    http, control, *_ = wired
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+
+    async def fake_status() -> tuple[bool | None, str]:
+        return True, "While the account is limited…"
+
+    control.sender.account_status = fake_status  # type: ignore[assignment]
+    data = http.post("/api/account/check", headers=auth).json()
+
+    assert data["limited"] is True
+    assert "申诉" in data["message"]
+
+
+def test_account_check_releases_brakes_when_clear(wired) -> None:
+    """确认没限制了：把熔断和停发状态一起松开，不用重启进程。"""
+    http, control, *_ = wired
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    control.sender.breaker.trip("测试熔断")
+    control.sender.write_forbidden.note("-1002001")
+
+    async def fake_status() -> tuple[bool | None, str]:
+        return False, "Good news, no limits are currently applied to your account."
+
+    control.sender.account_status = fake_status  # type: ignore[assignment]
+    data = http.post("/api/account/check", headers=auth).json()
+
+    assert data["limited"] is False
+    assert control.sender.breaker.tripped is False
+    assert control.sender.write_forbidden.blocked_targets() == {}
 
 
 # --------------------------------------------------------------------------

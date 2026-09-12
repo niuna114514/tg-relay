@@ -34,6 +34,7 @@ import os
 import secrets
 import signal
 import sys
+from html import escape as html_escape
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
 from . import logger as logsetup
+from .alerts import AlertHub
 from .config import AppConfig, ConfigError, apply_env, load_config, load_dotenv
 from .db import Store
 from .engine import RelayEngine
@@ -101,6 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--probe-send",
         action="store_true",
         help="权威判定目标能不能发：真的转发一条源消息（会往目标里发东西），然后退出",
+    )
+    parser.add_argument(
+        "--check-account",
+        action="store_true",
+        help="问 @SpamBot：这个号有没有被 Telegram 限制（群权限查不出来），然后退出",
     )
     parser.add_argument("--web", action="store_true", help="启动网页面板（与转发同进程）")
     parser.add_argument("--web-host", default="127.0.0.1", help="面板监听地址（默认只绑本机）")
@@ -249,6 +256,16 @@ async def self_check(sender: Sender, config: AppConfig) -> tuple[list[str], list
                     f"建议把该目标的 interval 设为 [{slow}, {slow + 5}] 以免每次都撞慢速模式"
                 )
             _warn_throughput(config, target.display, slow)
+    if ok and not problems:
+        # 说清楚这个自检的边界：它读的是**群**的权限，
+        # 而账号被 Telegram 限制时群权限一切正常（2026-09-12 就是这样：
+        # 自检报 OK，实际一条都发不出去）。别让人误以为 OK 就等于能发。
+        if config.targets:
+            log.info(
+                "注意：以上是**群权限**的预判。账号级限制（反垃圾把号限制了）在群权限里"
+                "完全看不出来，只有真发一条或问 @SpamBot 才知道 —— 分别用 "
+                "--probe-send 和 --check-account"
+            )
     return ok, problems
 
 
@@ -300,7 +317,11 @@ async def run(args: argparse.Namespace) -> int:
 
     client = build_client(config.credentials, config.proxy)  # type: ignore[arg-type]
     breaker = PeerFloodBreaker()
-    sender = Sender(client, config, store, breaker=breaker, dry_run=args.dry_run)
+    # 告警中枢：发送层往这里喊，__main__ 决定谁能收到（日志 + 操控 Bot）
+    alerts = AlertHub()
+    sender = Sender(
+        client, config, store, breaker=breaker, dry_run=args.dry_run, alerts=alerts
+    )
     engine = RelayEngine(config, store, sender)
     engine.attach(client)
 
@@ -346,6 +367,20 @@ async def run(args: argparse.Namespace) -> int:
                     exit_code = 2
             return exit_code
 
+        if args.check_account:
+            limited, detail = await sender.account_status()
+            if limited is True:
+                print("账号被限制：Telegram 反垃圾限制了这个号，先申诉并等解除。")
+                print(detail)
+                return 2
+            if limited is False:
+                print("账号正常：没有被限制。")
+                print(detail)
+                return 0
+            print("没能得到明确结论，请自行打开 @SpamBot 查看。")
+            print(detail)
+            return 1
+
         await engine.start()
         if not args.repost_only:
             listener = ManagedListener(client, engine, config)
@@ -354,28 +389,28 @@ async def run(args: argparse.Namespace) -> int:
             log.info("--repost-only：跳过实时转发监听，只做定时重发")
 
         # ---- 定时重发（可选）----
+        # 关键点：Reposter 对象**总是**构造出来，哪怕重发当前是关的。
+        # 因为面板/Bot 需要它才能「启动重发」，否则停了就只能重启进程（真实踩过）。
+        repost_wanted = bool(args.repost or config.repost.enabled)
         repost_once = args.repost_once or config.repost.run_mode == "once"
-        if args.repost_only and not (args.repost or config.repost.enabled):
-            log.error(
-                "--repost-only 需要同时启用重发：请在 config.yaml 里设 repost.enabled: true，"
-                "或加 --repost"
-            )
-            return 2
-        repost_enabled = args.repost or args.repost_only or repost_once or config.repost.enabled
-        if repost_enabled:
-            if args.dry_run:
-                log.warning(
-                    "--dry-run 下重发只打印日志，不会真的等待慢速窗口，"
-                    "所以看不到真实节奏；验证素材用 --repost-once，验证节奏请去掉 --dry-run"
-                )
-            reposter = Reposter(config, store, sender, client=client)
+        reposter = Reposter(config, store, sender, client=client)
+        if repost_wanted or repost_once:
             await reposter.load_messages()
-            if repost_once:
-                ok_count, bad = await reposter.run_cycle()
-                print(f"repost 单轮完成：成功 {ok_count}，跳过/失败 {bad}")
-                print(json.dumps(reposter.stats.as_dict(), ensure_ascii=False, indent=2))
-                return 0 if ok_count else 1
+        if repost_once:
+            ok_count, bad = await reposter.run_cycle()
+            print(f"repost 单轮完成：成功 {ok_count}，跳过/失败 {bad}")
+            print(json.dumps(reposter.stats.as_dict(), ensure_ascii=False, indent=2))
+            return 0 if ok_count else 1
+        if repost_wanted:
             reposter.start()
+        else:
+            # 以前这里直接 return 2，导致 `--repost-only` + 重发关闭 =
+            # systemd 无限重启（每次都连一次 Telegram）。现在改成"空转待命"：
+            # 面板和 Bot 照常在线，人在面板里点一下「启动重发」就能开始。
+            log.warning(
+                "定时重发当前是关闭的（repost.enabled=false）：不发任何消息，"
+                "只保持面板/Bot 在线。要开始发送，在面板点「启动重发」或给 bot 发 /repost on"
+            )
 
         if not args.dry_run and not args.repost_only:
             sent = await catch_up(client, engine, store, config)
@@ -395,7 +430,9 @@ async def run(args: argparse.Namespace) -> int:
             if args.web:
                 web_task = asyncio.create_task(_serve_web(args, config, store, sender, engine, reposter, client, control))
             if args.bot:
-                bot_task = asyncio.create_task(_serve_bot(args, config, control))
+                bot_task = asyncio.create_task(
+                    _serve_bot(args, config, control, alerts=alerts)
+                )
 
         stats_task = asyncio.create_task(_stats_loop(engine, store, stop_event, reposter))
         log.info(
@@ -474,6 +511,8 @@ async def _serve_bot(
     args: argparse.Namespace,
     config: AppConfig,
     control: "Any",
+    *,
+    alerts: AlertHub | None = None,
 ) -> None:
     """启动操控 Bot。
 
@@ -517,6 +556,16 @@ async def _serve_bot(
         log.error("操控 Bot 启动失败：%s: %s", type(exc).__name__, exc)
         log.error("常见原因：token 写错、被 @BotFather 撤销、或网络/代理不通")
         return
+
+    # 把 Bot 接成告警出口：熔断、账号被限制这类事会直接推到你手机上。
+    # 必须放在 start() 之后 —— 之前 client 还是 None，推不出去。
+    if alerts is not None:
+        async def _push_to_admins(level: str, text: str) -> None:
+            prefix = "🚨 <b>严重</b>" if level == "critical" else "⚠️ <b>提醒</b>"
+            await controller.notify_admins(f"{prefix}\n{html_escape(text)}")
+
+        alerts.add(_push_to_admins)
+
     # 一直挂在这里，直到进程退出
     await controller._task  # noqa: SLF001 - 保持引用直到退出
 

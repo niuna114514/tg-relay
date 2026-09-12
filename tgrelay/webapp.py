@@ -363,10 +363,31 @@ def create_app(
         except Exception as exc:
             raise guard(exc) from exc
 
+    @app.post("/api/repost/start", dependencies=[Depends(require_token)])
+    async def api_start_repost() -> dict[str, Any]:
+        try:
+            return await control.start_repost()
+        except Exception as exc:
+            raise guard(exc) from exc
+
     @app.post("/api/repost/stop", dependencies=[Depends(require_token)])
     async def api_stop_repost() -> dict[str, Any]:
         try:
             return control.stop_repost()
+        except Exception as exc:
+            raise guard(exc) from exc
+
+    # ---------------- 账号状态 ----------------
+
+    @app.post("/api/account/check", dependencies=[Depends(require_token)])
+    async def api_account_check() -> dict[str, Any]:
+        """问 @SpamBot：这个号有没有被 Telegram 限制（唯一能直接读到的办法）。
+
+        注意：账号被限制时，群权限依然显示"普通成员、可发言"，
+        所以被动检查永远看不出来，必须真问一次。
+        """
+        try:
+            return await control.check_account()
         except Exception as exc:
             raise guard(exc) from exc
 
@@ -533,10 +554,26 @@ border-radius:8px;padding:10px 14px;max-width:420px;font-size:13px}
       <input class="grow" id="matIds" placeholder="素材消息 ID，逗号分隔，如 6,7,8">
       <button onclick="setMaterials()">保存素材</button>
       <button onclick="runRepost()">立刻跑一轮</button>
-      <button class="danger" onclick="stopRepost()">停止重发</button>
+      <button id="repostToggle" class="danger" onclick="stopRepost()">停止重发</button>
+    </div>
+    <div class="empty" style="margin-top:8px">
+      「跑一轮」只发一轮就停，开关不动；「停止重发」会连 repost.enabled 一起关掉并写入 config.yaml，
+      所以重启进程/重启服务器都不会自己又开始发。
     </div>
     <table style="margin-top:12px"><thead><tr><th>消息 ID</th><th>内容预览</th><th>已发次数</th></tr></thead>
     <tbody id="materials"></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>账号状态</h2>
+    <div class="grid" id="account"></div>
+    <div class="row" style="margin-top:12px">
+      <button id="acctBtn" onclick="checkAccount()">账号自检</button>
+      <span class="empty" style="flex:1">
+        真的去问一次 @SpamBot（会占用几秒）。这是唯一能查出「账号被 Telegram 限制」的办法 ——
+        号被限制时，群权限照样显示「普通成员、可发言」。
+      </span>
+    </div>
   </section>
 
   <section class="card">
@@ -653,6 +690,29 @@ function render(report){
   document.getElementById('materials').innerHTML = mats.length ? mats.map(m=>
     `<tr><td class="mono">${m.msg_id}</td><td>${esc(m.preview)||'<span class="empty">(非文本)</span>'}</td><td>${m.posted}</td></tr>`
   ).join('') : '<tr><td colspan="3" class="empty">还没有素材</td></tr>';
+
+  // 「停止/启动重发」按钮跟着真实运行状态走，不靠人记
+  const tg = document.getElementById('repostToggle');
+  if (tg){
+    tg.textContent = rp.running ? '停止重发' : '启动重发';
+    tg.onclick = rp.running ? stopRepost : startRepost;
+    tg.className = rp.running ? 'danger' : '';
+  }
+
+  // 账号状态：熔断原因 + 被停发的目标 + 最近告警
+  const acct = report.account || {};
+  const blocked = Object.entries(acct.write_forbidden || {});
+  const alerts = acct.alerts || [];
+  const acctCards = [
+    ['账号状态', acct.breaker ? '已熔断' : '正常', acct.breaker ? 'bad' : ''],
+    ['被停发的目标', blocked.length ? blocked.map(([k,v])=>k+'（'+Math.ceil(v/60)+'分）').join('、') : '无', blocked.length ? 'bad' : ''],
+  ];
+  let html = acctCards.map(([k,v,cls])=>
+    `<div class="kv"><div class="k">${esc(k)}</div><div class="v" style="${cls==='bad'?'color:var(--bad)':''}">${esc(v)}</div></div>`
+  ).join('');
+  if (acct.breaker) html += `<div class="empty" style="flex:1 1 100%;color:var(--bad)">${esc(acct.breaker)}</div>`;
+  if (alerts.length) html += `<div class="empty" style="flex:1 1 100%">最近告警：${alerts.map(a=>esc(a.text.split('\\n')[0])).join(' ｜ ')}</div>`;
+  document.getElementById('account').innerHTML = html;
 }
 
 function renderLogs(lines){
@@ -828,9 +888,24 @@ async function runRepost(){
   catch(e){ toast(e.message,'err'); }
 }
 async function stopRepost(){
-  if (!confirm('停止定时重发循环？（进程继续运行，只是不再重发）')) return;
-  try{ await api('POST','/api/repost/stop'); toast('已请求停止重发','ok'); }
+  if (!confirm('停止定时重发循环？（进程继续运行，只是不再重发；重发开关会一起关掉并落盘，重启也不会自动开）')) return;
+  try{ await api('POST','/api/repost/stop'); toast('已停止重发，开关已关闭并写入配置','ok'); refresh(); }
   catch(e){ toast(e.message,'err'); }
+}
+async function startRepost(){
+  if (!confirm('启动定时重发？\\n\\n这会同时清掉「熔断」和「禁止发言」的暂停状态。\\n如果账号其实还在被 Telegram 限制，下一个周期会再次熔断（不会白跑）。')) return;
+  try{ const r = await api('POST','/api/repost/start'); toast(`重发已启动：每轮间隔 ${r.interval}s，日额度 ${r.daily_limit}`,'ok'); refresh(); }
+  catch(e){ toast(e.message,'err'); }
+}
+async function checkAccount(){
+  const btn = document.getElementById('acctBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '正在问 @SpamBot…'; }
+  try{
+    const r = await api('POST','/api/account/check');
+    toast(r.message + '\\n' + (r.detail||'').slice(0,200), r.limited===false?'ok':'err');
+    refresh();
+  }catch(e){ toast(e.message,'err'); }
+  finally{ if (btn) { btn.disabled = false; btn.textContent = '账号自检'; } }
 }
 async function saveRate(){
   const gpm = Number(document.getElementById('gpm').value);

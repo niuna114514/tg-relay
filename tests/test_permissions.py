@@ -39,32 +39,43 @@ from tgrelay.sender import Sender  # noqa: E402
 class BannedRights:
     """对应 tl.types.ChatBannedRights（default_banned_rights）。
 
+    **这些 flag 是反的**（官方 TL 文档原话：
+    "the flags are inverted: if set, a flag does not allow a user to do X"，
+    见 https://docs.pyrogram.org/telegram/types/chat-banned-rights ）：
+        True  = 禁止
+        False = 允许
+    所以全部 False 才是"什么都能发"的开放群。
+
     真实目标群的取值（实测）：
-        send_messages=False, send_plain=False, send_photos=True, send_media=True …
-    这种群是"禁文字、允许媒体"，转发照样能成功。
+        send_messages=False, send_plain=False,      ← 文字**允许**
+        send_media=True, send_photos=True, embed_links=True, …  ← 媒体/链接**禁止**
+    也就是"只让普通成员发纯文本"的广告群，一条纯文字转发在里面能成功。
+
+    历史坑：这个方向一开始搞反了（把 True 读成"允许"），
+    于是"全 False"被当成"全部被禁"，反而会把一个完全开放的群拦下来。
     """
 
-    send_messages: bool = True
-    send_plain: bool = True
-    send_media: bool = True
-    send_photos: bool = True
-    send_videos: bool = True
-    send_docs: bool = True
-    send_gifs: bool = True
-    send_stickers: bool = True
+    send_messages: bool = False
+    send_plain: bool = False
+    send_media: bool = False
+    send_photos: bool = False
+    send_videos: bool = False
+    send_docs: bool = False
+    send_gifs: bool = False
+    send_stickers: bool = False
 
 
-def all_false_banned_rights() -> BannedRights:
-    """所有发送位全 False —— 唯一确定发不出东西的情形。"""
+def all_banned_rights() -> BannedRights:
+    """文字和所有媒体都被禁 —— 这才是真的发不出任何东西。"""
     return BannedRights(
-        send_messages=False,
-        send_plain=False,
-        send_media=False,
-        send_photos=False,
-        send_videos=False,
-        send_docs=False,
-        send_gifs=False,
-        send_stickers=False,
+        send_messages=True,
+        send_plain=True,
+        send_media=True,
+        send_photos=True,
+        send_videos=True,
+        send_docs=True,
+        send_gifs=True,
+        send_stickers=True,
     )
 
 
@@ -133,17 +144,17 @@ def make_sender(client: PermClient, tmp_path: Path, *, dry_run: bool = False) ->
 # --------------------------------------------------------------------------
 
 
-async def test_media_only_group_is_allowed(tmp_path: Path) -> None:
-    """**核心回归**：真实目标群 —— 禁文字但允许媒体。
+async def test_text_only_group_allows_forward(tmp_path: Path) -> None:
+    """**核心回归**：真实目标群 —— 只允许文字、禁止媒体和链接。
 
-    这是实测出来的：`send_messages=False`（且 `send_plain=False`）的群，
-    用 `forward_messages` 转发带来源的消息**能成功**，
-    所以绝不能因为这两个字段就判定"不能发"。
+    这是实测出来的：`send_messages=False`（且 `send_plain=False`）的群代表
+    文字**允许**，用 `forward_messages` 转发一条纯文字消息能成功（实测发出过 229 条），
+    所以绝不能因为"媒体位是 True"就判定"不能发"。
     """
     client = PermClient(
         entity=Entity(
             default_banned_rights=BannedRights(
-                send_messages=False, send_plain=False, send_photos=True
+                send_media=True, send_photos=True, send_docs=True, send_gifs=True
             )
         ),
         permissions=Permissions(participant=Participant()),
@@ -151,31 +162,34 @@ async def test_media_only_group_is_allowed(tmp_path: Path) -> None:
     sender, store = make_sender(client, tmp_path)
     try:
         allowed, reason = await sender.postability(Target(id=-2001))
-        assert allowed is True, f"禁文字但允许媒体的群不应被拦下，实际原因: {reason}"
+        assert allowed is True, f"只禁媒体的群不应被拦下，实际原因: {reason}"
         assert await sender.check_write_permission(Target(id=-2001)) == ""
     finally:
         store.close()
 
 
-async def test_all_send_rights_false_is_denied(tmp_path: Path) -> None:
-    """所有发送位全 False 才是真的发不出去。"""
+async def test_everything_banned_is_denied(tmp_path: Path) -> None:
+    """文字和所有媒体都被禁，才是真的发不出去。"""
     client = PermClient(
-        entity=Entity(default_banned_rights=all_false_banned_rights()),
+        entity=Entity(default_banned_rights=all_banned_rights()),
         permissions=Permissions(participant=Participant()),
     )
     sender, store = make_sender(client, tmp_path)
     try:
         allowed, reason = await sender.postability(Target(id=-2001))
         assert allowed is False
-        assert "所有发送类权限" in reason
+        assert "媒体都被禁" in reason
     finally:
         store.close()
 
 
-async def test_plain_text_only_banned_still_allowed(tmp_path: Path) -> None:
-    """只禁纯文本（媒体类全开）-> 允许。"""
+async def test_text_banned_media_ok_still_allowed(tmp_path: Path) -> None:
+    """只禁文字（媒体类全开）-> 允许：能不能发取决于素材本身，这里看不到素材。
+
+    宁可放行让发送时去撞真实错误（错误分级很细），也不要误拦一个其实能发媒体的群。
+    """
     client = PermClient(
-        entity=Entity(default_banned_rights=BannedRights(send_messages=False)),
+        entity=Entity(default_banned_rights=BannedRights(send_messages=True, send_plain=True)),
         permissions=Permissions(participant=Participant()),
     )
     sender, store = make_sender(client, tmp_path)
@@ -187,9 +201,13 @@ async def test_plain_text_only_banned_still_allowed(tmp_path: Path) -> None:
 
 
 async def test_open_group_is_allowed(tmp_path: Path) -> None:
-    """普通群：默认成员可发言 -> 允许（字段缺失不能再被误判）。"""
+    """普通开放群：所有 flag 都是 False（= 什么都不禁）-> 允许。
+
+    这一条是方向搞反时的重灾区：早期把"全 False"读成"全部被禁"，
+    于是完全开放的群反而被判成"发不出任何东西"。
+    """
     client = PermClient(
-        entity=Entity(default_banned_rights=BannedRights(send_messages=True)),
+        entity=Entity(default_banned_rights=BannedRights()),
         permissions=Permissions(participant=Participant()),
     )
     sender, store = make_sender(client, tmp_path)
@@ -223,7 +241,7 @@ async def test_missing_default_rights_is_treated_as_allowed(tmp_path: Path) -> N
 async def test_admin_with_post_rights_is_allowed(tmp_path: Path) -> None:
     """管理员且有 post_messages -> 允许，即使群默认禁言。"""
     client = PermClient(
-        entity=Entity(default_banned_rights=BannedRights(send_messages=False)),
+        entity=Entity(default_banned_rights=all_banned_rights()),
         permissions=Permissions(
             participant=Participant(admin_rights=AdminRights(post_messages=True)),
             is_admin=True,
@@ -240,7 +258,7 @@ async def test_admin_with_post_rights_is_allowed(tmp_path: Path) -> None:
 async def test_admin_without_post_rights_is_denied(tmp_path: Path) -> None:
     """管理员但权限位里没有发送消息 -> 不能发。"""
     client = PermClient(
-        entity=Entity(default_banned_rights=BannedRights(send_messages=False)),
+        entity=Entity(default_banned_rights=all_banned_rights()),
         permissions=Permissions(
             participant=Participant(admin_rights=AdminRights(post_messages=False, send_messages=False)),
             is_admin=True,
@@ -257,7 +275,7 @@ async def test_admin_without_post_rights_is_denied(tmp_path: Path) -> None:
 
 async def test_creator_counts_as_admin(tmp_path: Path) -> None:
     client = PermClient(
-        entity=Entity(default_banned_rights=BannedRights(send_messages=False)),
+        entity=Entity(default_banned_rights=all_banned_rights()),
         permissions=Permissions(
             participant=Participant(admin_rights=AdminRights(send_messages=True)),
             is_creator=True,
@@ -278,7 +296,7 @@ async def test_creator_counts_as_admin(tmp_path: Path) -> None:
 
 async def test_banned_is_denied(tmp_path: Path) -> None:
     client = PermClient(
-        entity=Entity(default_banned_rights=BannedRights(send_messages=True)),
+        entity=Entity(default_banned_rights=BannedRights()),
         permissions=Permissions(participant=Participant(), is_banned=True),
     )
     sender, store = make_sender(client, tmp_path)
@@ -292,7 +310,7 @@ async def test_banned_is_denied(tmp_path: Path) -> None:
 
 async def test_left_group_is_denied(tmp_path: Path) -> None:
     client = PermClient(
-        entity=Entity(default_banned_rights=BannedRights(send_messages=True)),
+        entity=Entity(default_banned_rights=BannedRights()),
         permissions=Permissions(participant=Participant(), has_left=True),
     )
     sender, store = make_sender(client, tmp_path)
@@ -307,7 +325,7 @@ async def test_left_group_is_denied(tmp_path: Path) -> None:
 async def test_permission_read_failure_falls_back_to_default_rights(tmp_path: Path) -> None:
     """读不到权限对象时，用 default_banned_rights 兜底，而不是盲目放行。"""
     client = PermClient(
-        entity=Entity(default_banned_rights=all_false_banned_rights()),
+        entity=Entity(default_banned_rights=all_banned_rights()),
         permissions=RuntimeError("读取失败"),
     )
     sender, store = make_sender(client, tmp_path)
@@ -320,7 +338,7 @@ async def test_permission_read_failure_falls_back_to_default_rights(tmp_path: Pa
 
 async def test_dry_run_skips_permission_checks(tmp_path: Path) -> None:
     client = PermClient(
-        entity=Entity(default_banned_rights=all_false_banned_rights()),
+        entity=Entity(default_banned_rights=all_banned_rights()),
         permissions=Permissions(participant=Participant()),
     )
     sender, store = make_sender(client, tmp_path, dry_run=True)

@@ -292,10 +292,11 @@ async def test_repost_counts_only_successful_posts(tmp_path: Path) -> None:
 
         # 语义区分（重要）：
         #   reposted_today / sent_today = 真正发出去的条数
-        #   checked_today               = 额度检查通过（预占）的次数
-        # 失败那条预占了额度但没发出去，所以 checked=2 而 sent=1。
+        #   checked_today               = 额度占位次数
+        # 失败那条**占位已经退回去了**（release_checked）：它根本没送到群里，
+        # 不该继续占着当天的配额，否则一个被封的目标会把配额整个吃光。
         assert store.reposted_today() == 1
-        assert store.checked_today(as_repost=True) == 2
+        assert store.checked_today(as_repost=True) == 1
         assert store.sent_ok_today(as_repost=True) == 1
         assert store.sent_ok_today() == 1          # 总共只发出 1 条
         assert store.sent_ok_today(as_repost=False) == 0  # 实时转发一条都没发

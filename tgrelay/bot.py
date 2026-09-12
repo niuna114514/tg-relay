@@ -82,12 +82,16 @@ HELP_TEXT = """<b>tg-relay 控制台</b>
 /interval &lt;秒&gt; — 改**轮次间隔**：一轮跑完等多久跑下一轮（必须 ≥ 31）
 /dailylimit &lt;条数&gt; — 改重发日额度
 /run — 立刻跑一轮
-/stop — 停止重发循环
+/stop — 停止重发循环（并写盘，重启不会自动开）
+/repost on|off — 重新启动 / 停止重发循环
 
 <i>注意别把两个"间隔"搞混：
   /limit 改的是「同一个群两次发消息之间至少隔多久」；
   /interval 改的是「重发循环多久跑一轮」。
   一轮要把所有素材各发一遍，所以轮次间隔最好 &gt; 素材数 × 群发送间隔。</i>
+
+<b>账号</b>
+/account — 问 @SpamBot：这个号有没有被 Telegram 限制（唯一靠谱的查法）
 
 <b>其它</b>
 /help — 显示这条帮助
@@ -620,4 +624,46 @@ class BotController:
 
     async def _cmd_stop(self, _: str) -> str:
         self.control.stop_repost()
-        return "⏹ 已请求停止重发循环（进程仍在运行）"
+        return "⏹ 已停止重发循环，并把重发开关写成「关」——重启进程/重启服务器都不会自己又开始发。\n用 /repost on 可以重新启动。"
+
+    async def _cmd_repost(self, argument: str) -> str:
+        """开关定时重发。/stop 的逆操作。"""
+        word = argument.strip().lower()
+        if word in ("on", "start", "开", "启动"):
+            result = await self.control.start_repost()
+            return (
+                f"▶️ 重发已启动：每轮间隔 {result['interval']:g}s，日额度 {result['daily_limit']}\n"
+                "（已顺带清掉熔断和「禁止发言」的暂停状态；如果账号其实还在被限制，很快会再次熔断）"
+            )
+        if word in ("off", "stop", "关", "停止"):
+            self.control.stop_repost()
+            return "⏹ 重发已停止，开关已写盘（重启也不会自动开）"
+        state = self.control.snapshot()["repost"]
+        return (
+            f"重发现在：{'运行中' if state['running'] else '已停止'}"
+            f"（开关 {'开' if state['enabled'] else '关'}）\n"
+            "用法：/repost on 启动，/repost off 停止"
+        )
+
+    async def _cmd_account(self, _: str) -> str:
+        """问 @SpamBot：这个号有没有被 Telegram 限制。"""
+        result = await self.control.check_account()
+        icon = {True: "🚫", False: "✅", None: "❓"}[result["limited"]]
+        detail = html.escape((result["detail"] or "")[:600])
+        return f"{icon} <b>账号自检</b>\n{html.escape(result['message'])}\n\n<blockquote>{detail}</blockquote>"
+
+    # ---------------- 主动通知 ----------------
+
+    async def notify_admins(self, text: str) -> None:
+        """把告警推给所有管理员（熔断、账号被限制这类事必须让人马上知道）。
+
+        没有 client（bot 没启动）或没有管理员时静默返回：
+        告警本身已经进了日志，不能因为推不出去就抛异常。
+        """
+        if self.client is None or not self.allowed:
+            return
+        for user_id in sorted(self.allowed):
+            try:
+                await self.client.send_message(user_id, text, parse_mode="html")
+            except Exception as exc:
+                log.warning("给 %s 推送告警失败：%s", user_id, exc)

@@ -264,6 +264,23 @@ class Store:
             self._conn.commit()
             return self.checked_today(as_repost=as_repost)
 
+    def release_checked(self, count: int = 1, *, as_repost: bool = False) -> int:
+        """退还额度占位，返回退还后的累计值。
+
+        占位（checked）是为了让 `daily_cap=100` 真的能发满 100 条；
+        但一条永久失败、根本没送到群里的消息不该继续占着额度，
+        否则一个被封的目标会把当天配额整个吃光。
+        用 MAX(0, ...) 夹住，避免并发退还把计数做成负数。
+        """
+        column = "repost_checked" if as_repost else "checked"
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE daily_counter SET {column} = MAX(0, {column} - ?) WHERE day = ?",
+                (int(count), self._today()),
+            )
+            self._conn.commit()
+            return self.checked_today(as_repost=as_repost)
+
     def target_checked_today(self, target_id: int | str) -> int:
         with self._lock:
             row = self._conn.execute(
@@ -271,6 +288,18 @@ class Store:
                 (self._today(), str(target_id)),
             ).fetchone()
             return int(row["checked"]) if row else 0
+
+    def release_target_checked(self, target_id: int | str, count: int = 1) -> int:
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE target_daily SET checked = MAX(0, checked - ?)
+                WHERE day = ? AND target_id = ?
+                """,
+                (int(count), self._today(), str(target_id)),
+            )
+            self._conn.commit()
+            return self.target_checked_today(target_id)
 
     def note_target_checked(self, target_id: int | str, count: int = 1) -> int:
         with self._lock:

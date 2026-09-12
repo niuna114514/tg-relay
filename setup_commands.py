@@ -70,7 +70,10 @@ COMMANDS: list[tuple[str, str]] = [
     ("interval", "改重发轮次间隔（秒）"),
     ("dailylimit", "改重发每日额度"),
     ("run", "立刻跑一轮重发"),
-    ("stop", "停止重发循环"),
+    ("stop", "停止重发循环（并写盘，重启不会自动开）"),
+    ("repost", "启动/停止重发循环：/repost on|off"),
+    # 账号
+    ("account", "问 @SpamBot：这个号有没有被 Telegram 限制"),
     # 其它
     ("help", "显示完整帮助"),
 ]

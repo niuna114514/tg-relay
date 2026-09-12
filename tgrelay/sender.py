@@ -36,6 +36,7 @@ from typing import Any, Iterable, Sequence
 
 from telethon import errors
 
+from .alerts import AlertHub
 from .config import AppConfig, Rate, Target
 from .db import Store
 
@@ -103,12 +104,30 @@ PERMANENT_ERRORS = tuple(
     getattr(errors, name) for name in _PERMANENT_NAMES if hasattr(errors, name)
 )
 
+# 「禁止发言」这一类：Telegram 用它表达两件完全不同的事，必须分开对待
+#   1) 只有这一个群这样 → 群的问题（群改了权限 / 群把号封了）
+#   2) 多个群同时这样   → **账号级限制**（反垃圾把号限制了，@SpamBot 能查到）
+# 2026-09-12 真实踩过第 2 种：号被限制后转发报 UserBannedInChannelError，
+# 而 `channels.GetParticipant` 显示"普通成员、无 banned_rights"——
+# 光看群权限根本看不出来，是被 @SpamBot 点破的。
+_WRITE_FORBIDDEN_NAMES = (
+    "ChatWriteForbiddenError",
+    "UserBannedInChannelError",
+)
+WRITE_FORBIDDEN_ERRORS = tuple(
+    getattr(errors, name) for name in _WRITE_FORBIDDEN_NAMES if hasattr(errors, name)
+)
+
 # 这些错误给一句人话解释
 _ERROR_HINTS = {
     "ChatForwardsRestrictedError": "该频道开启了『禁止转发』保护。用已开通 Premium 的号，或改用 copy 模式重发内容。",
-    "ChatWriteForbiddenError": "该群禁止发言（可能只允许管理员发帖）。",
+    "ChatWriteForbiddenError": "该群不让这个号发言。如果**多个群**都这样，就是账号被 Telegram 限制了（用 @SpamBot 查）。",
     "ChatAdminRequiredError": "该操作需要管理员权限。",
-    "UserBannedInChannelError": "这个号已被该群/频道封禁。",
+    "UserBannedInChannelError": (
+        "这个号不能往该群发消息。两种可能：群把号封了／改了权限，"
+        "或者**账号被 Telegram 反垃圾限制了**——后者会影响所有群，"
+        "用 @SpamBot 查一下就知道。"
+    ),
     "UserNotParticipantError": "这个号还没加入该群。",
     "ChannelPrivateError": "该群/频道是私有的，或这个号已被移出。",
     "PeerIdInvalidError": "无法解析该 ID：请先用这个号打开过一次该会话（暖场）。",
@@ -341,6 +360,65 @@ class PeerFloodBreaker:
         return self._event
 
 
+class WriteForbiddenGuard:
+    """把「禁止发言」拆成"这个群的问题"和"账号的问题"，并各自刹车。
+
+    为什么必须有这个东西（真实事故）：
+        定时重发是**直接调 `Sender.send()`** 的，不走 TargetWorker 那条队列，
+        所以 worker 上那套"永久失败就暂停目标"的保护对它无效。
+        结果是号已经被限制、每条都失败，重发循环还每 31 秒再试一次，
+        白白叠加负面信号。
+
+    判定规则：
+        * 单个目标报这个错 → 只封这个目标一段时间（PER_TARGET_COOLDOWN）；
+        * 窗口期内**第二个不同的目标**也报 → 判定为账号级限制，
+          返回 account_level=True，交由调用方熔断整个程序。
+    """
+
+    ACCOUNT_LEVEL_TARGETS = 2
+    ACCOUNT_LEVEL_WINDOW = 900.0    # 15 分钟内两个不同群都出事 = 账号级
+    PER_TARGET_COOLDOWN = 1800.0    # 单个目标被禁言后，30 分钟内不再尝试
+
+    def __init__(self) -> None:
+        self._recent: dict[str, float] = {}
+        self._blocked: dict[str, float] = {}
+
+    def note(self, target_id: Any, *, now: float | None = None) -> tuple[bool, int]:
+        """记一次"禁止发言"。返回 (是否账号级, 窗口内出事的不同目标数)。"""
+        now = time.monotonic() if now is None else now
+        key = str(target_id)
+        self._recent = {
+            name: when
+            for name, when in self._recent.items()
+            if now - when <= self.ACCOUNT_LEVEL_WINDOW
+        }
+        self._recent[key] = now
+        self._blocked[key] = now + self.PER_TARGET_COOLDOWN
+        return len(self._recent) >= self.ACCOUNT_LEVEL_TARGETS, len(self._recent)
+
+    def blocked_remaining(self, target_id: Any, *, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else now
+        return max(0.0, self._blocked.get(str(target_id), 0.0) - now)
+
+    def clear(self, target_id: Any) -> None:
+        key = str(target_id)
+        self._blocked.pop(key, None)
+        self._recent.pop(key, None)
+
+    def clear_all(self) -> None:
+        self._blocked.clear()
+        self._recent.clear()
+
+    def blocked_targets(self, *, now: float | None = None) -> dict[str, float]:
+        """还剩多少秒 —— 给面板/日志看。"""
+        now = time.monotonic() if now is None else now
+        return {
+            name: round(until - now)
+            for name, until in self._blocked.items()
+            if until > now
+        }
+
+
 # --------------------------------------------------------------------------
 # 发送器
 # --------------------------------------------------------------------------
@@ -355,6 +433,7 @@ class Sender:
         *,
         breaker: PeerFloodBreaker | None = None,
         dry_run: bool = False,
+        alerts: AlertHub | None = None,
     ) -> None:
         self.client = client
         self.config = config
@@ -364,8 +443,15 @@ class Sender:
         self.pacer = Pacer(config.rate, premium=config.premium)
         self.flood = FloodGuard()
         self.slow = SlowModeGuard()
+        self.write_forbidden = WriteForbiddenGuard()
+        self.alerts = alerts or AlertHub()
         self.stats = SenderStats()
         self._budget_lock = asyncio.Lock()
+        # 上次问 @SpamBot 的时刻（monotonic）；None = 还没问过
+        self._last_account_check: float | None = None
+        # 这两个是给测试用的：真实环境下 @SpamBot 一般 1~3 秒回话
+        self.account_check_interval = 2.0
+        self.account_check_polls = 8
 
     # ---------- 实体解析 ----------
 
@@ -413,15 +499,18 @@ class Sender:
         * Telethon 的 `ParticipantPermissions` 根本没有 `send_messages`
           （见 telethon/tl/custom/participantpermissions.py，它只描述管理员权限），
           所以"普通成员能不能发言"读不到，只能看 `default_banned_rights`。
-        * `default_banned_rights` 是 **ChatBannedRights**，是一整组开关。
-          实测目标群 `send_messages=False` 但 `send_photos=True`：
-          它其实是"禁止文字、只允许媒体"的群；`forward_messages` 走媒体那条路，
-          所以**照样能转发成功**。把它当成"全体禁言"是错的。
-        * 因此只有当**所有**发送类权限位都是 False 时，才判定为真的发不出东西。
+        * `default_banned_rights` 是 **ChatBannedRights**，是一整组开关，
+          而且 **True = 禁止**（不是"允许"）。实测目标群
+          `send_messages=False, send_photos=True, send_media=True, embed_links=True`：
+          它其实是「**只允许发纯文本**」的广告群——文字能发，图片/链接不能。
+          正因为如此，一条纯文字转发在那个群里能成功，看图权限位会得出相反结论。
+        * 所以只有**连纯文本都不让发、并且所有媒体类型也全禁**时，才判定真的发不出东西。
           其余情况一律放行——宁可让发送时去撞真实错误（错误分级已经很细），
           也不要因为误判把能用的目标拦下来。
 
         想要 100% 确定的结论，用 `--probe-send` 真发一条试试。
+        另外这个函数**读不到账号级限制**：号被 Telegram 限制时，
+        群权限依然显示"普通成员、可发言"。那种情况只能靠真发或问 @SpamBot。
         """
         participant = getattr(permissions, "participant", None) if permissions is not None else None
 
@@ -451,16 +540,27 @@ class Sender:
         if default_banned is None:
             return True, ""
 
-        present = {
-            flag: getattr(default_banned, flag)
+        # ChatBannedRights 里 True = 禁止。分两组看：文字和媒体。
+        text_banned = bool(
+            getattr(default_banned, "send_messages", False)
+            or getattr(default_banned, "send_plain", False)
+        )
+        media_flags = [
+            flag
             for flag in cls.SEND_RIGHT_FLAGS
-            if hasattr(default_banned, flag)
-        }
-        if present and all(value is False for value in present.values()):
+            if flag not in ("send_messages", "send_plain") and hasattr(default_banned, flag)
+        ]
+        media_all_banned = bool(media_flags) and all(
+            getattr(default_banned, flag) for flag in media_flags
+        )
+
+        if text_banned and media_all_banned:
             return False, (
-                "该群默认成员权限里所有发送类权限都是 False（连媒体也不行），"
-                "这个号又不是管理员，确实发不出任何东西"
+                "该群默认成员权限里**文字和所有媒体都被禁**，这个号又不是管理员，"
+                "确实发不出任何东西"
             )
+        # 只禁文字、或只禁某几类媒体：能不能发取决于**素材本身**是文字还是媒体，
+        # 这个函数看不到素材，所以放行，让发送时去撞真实错误（错误分级已经足够细）。
         return True, ""
 
     async def postability(self, target: Target) -> tuple[bool, str]:
@@ -488,11 +588,12 @@ class Sender:
     async def probe_send(self, target: Target) -> tuple[bool, str]:
         """权威判定：真的转发一条源消息，看 Telegram 是接受还是拒绝。
 
-        被动读权限位已被实测证明不可靠（`send_messages=False` 的群照样能转发），
-        所以拿不准时用这个。**注意：这会真的往目标里发一条消息。**
+        被动读权限位已被实测证明不可靠（群权限显示"可发言"，
+        账号却可能被 Telegram 限制），所以拿不准时用这个。
+        **注意：这会真的往目标里发一条消息。**
 
-        也正因为被动判定不可靠，`postability()` 只在"所有发送位全 False"时才拦人，
-        其余情况放行，交给发送时的错误分级去处理。
+        探测成功说明"这个号现在确实能往这个群发"，
+        于是顺手清掉该目标因「禁止发言」留下的冷板凳。
         """
         source = self.config.source
         try:
@@ -512,7 +613,11 @@ class Sender:
             )
         except Exception as exc:
             note = _hint(exc)
+            if isinstance(exc, WRITE_FORBIDDEN_ERRORS):
+                self.write_forbidden.note(target.id)
             return False, f"{type(exc).__name__}: {exc}" + (f" —— {note}" if note else "")
+
+        self.write_forbidden.clear(target.id)
 
         if isinstance(result, (list, tuple)):
             ids = [getattr(item, "id", None) for item in result]
@@ -629,6 +734,96 @@ class Sender:
             cap = target.daily_limit if cap <= 0 else min(cap, target.daily_limit)
         return cap
 
+    async def _release_budget(self, *, as_repost: bool, target: Target | None) -> None:
+        """把没送出去的额度占位退回去。
+
+        占位（checked）存在的意义是"让 daily_cap=100 真能发满 100 条"，
+        但一条永久失败的消息并没有占用群里的位置，继续占着额度只会让
+        一个已经被封的目标把当天的配额吃光。静默失败不致命，所以这里吞异常。
+        """
+        try:
+            self.store.release_checked(1, as_repost=as_repost)
+            if target is not None:
+                self.store.release_target_checked(target.id, 1)
+        except Exception:  # pragma: no cover - 退额度失败不该影响主流程
+            log.exception("退还额度占位失败（%s）", target.display if target else "全局")
+
+    async def _handle_write_forbidden(self, target: Target, exc: Exception) -> None:
+        """「禁止发言」的统一处置：先封单个目标，再判断是不是账号级限制。"""
+        account_level, count = self.write_forbidden.note(target.id)
+
+        # 计数法（多个群同时出事）只在群多的时候有效。
+        # 只配了一个群时它永远达不到阈值，所以这里补一次**权威**判定：
+        # 问 @SpamBot。半小时最多问一次，避免失败重试时反复打扰。
+        if not account_level and self._should_consult_account():
+            limited, detail = await self.account_status()
+            self._last_account_check = time.monotonic()
+            if limited:
+                account_level = True
+                log.error("@SpamBot 确认：账号当前处于被限制状态")
+            else:
+                log.info("已问过 @SpamBot：账号目前没有被限制，问题出在这个群本身")
+
+        if account_level:
+            self.breaker.trip(
+                f"{count} 个目标报「禁止发言」（{type(exc).__name__}）——"
+                "这是**账号级**限制，不是单个群的问题"
+            )
+            await self.alerts(
+                "critical",
+                "已熔断停止全部发送：这个号被 Telegram 限制了（反垃圾），不是群的问题。\n"
+                "先去 @SpamBot 看状态并申诉；解除后重新开启重发即可。\n"
+                "限制解除前继续发只会加重处罚。",
+            )
+            return
+        await self.alerts(
+            "warning",
+            f"{target.display} 报 {type(exc).__name__}：已把这个目标停发 "
+            f"{self.write_forbidden.PER_TARGET_COOLDOWN / 60:.0f} 分钟。\n"
+            "如果**其它群**也开始这样，那就是账号被限制了（@SpamBot 可查）。",
+        )
+
+    def _should_consult_account(self) -> bool:
+        if self._last_account_check is None:
+            return True
+        return (
+            time.monotonic() - self._last_account_check
+            >= self.write_forbidden.ACCOUNT_LEVEL_WINDOW
+        )
+
+    async def account_status(self) -> tuple[bool | None, str]:
+        """问 @SpamBot：这个号现在有没有被限制。
+
+        返回 (是否被限制, 原文)。None 表示问不出来（网络/被拒），
+        —— 这是唯一能直接读到"账号级限制"的办法：
+        `channels.GetParticipant` 在账号被限制时依然显示"普通成员、无限制"。
+        **注意这会真的给 @SpamBot 发一条 /start。**
+        """
+        try:
+            bot = await self.client.get_entity("SpamBot")
+            sent = await self.client.send_message(bot, "/start")
+            reply = None
+            for _ in range(self.account_check_polls):
+                await asyncio.sleep(self.account_check_interval)
+                for msg in await self.client.get_messages(bot, limit=5):
+                    if getattr(msg, "id", None) != getattr(sent, "id", None) and getattr(msg, "text", None):
+                        reply = msg
+                        break
+                if reply is not None:
+                    break
+        except Exception as exc:
+            return None, f"问 @SpamBot 失败：{type(exc).__name__}: {exc}"
+
+        if reply is None:
+            return None, "15 秒内没收到 @SpamBot 的回复，稍后再试"
+
+        text = reply.text or ""
+        if "no limits are currently applied" in text or "free as a bird" in text:
+            return False, text
+        if "limited" in text.lower() or "sorry" in text.lower():
+            return True, text
+        return None, f"看不懂 @SpamBot 的回复：{text[:200]}"
+
     # ---------- 单次转发 ----------
 
     async def _forward(self, job: RelayJob, target: Target) -> Sequence[Any]:
@@ -677,6 +872,21 @@ class Sender:
 
         if self.breaker.tripped:
             return SendOutcome("skipped", error=f"熔断中：{self.breaker.reason}", permanent=True)
+
+        # 这个号刚被这个群拒过「禁止发言」：冷却期内连 API 都不碰。
+        # 定时重发是直接调这里的，不走 worker 队列，所以这道闸必须放在最前面。
+        blocked = self.write_forbidden.blocked_remaining(target.id)
+        if blocked > 0:
+            self.stats.skipped += 1
+            self.stats.bump(target.id, "skipped")
+            return SendOutcome(
+                "skipped",
+                error=(
+                    f"{target.display} 因「禁止发言」停发中，还剩约 {blocked / 60:.0f} 分钟。"
+                    "如果别的群也这样，就是账号被限制了（@SpamBot 可查）"
+                ),
+                permanent=True,
+            )
 
         remaining = self.flood.wait_for(target.id)
         if remaining > 0:
@@ -793,6 +1003,12 @@ class Sender:
 
             except errors.PeerFloodError as exc:
                 self.breaker.trip(f"收到 PeerFloodError：{exc}")
+                await self._release_budget(as_repost=as_repost, target=target)
+                await self.alerts(
+                    "critical",
+                    "熔断：收到 PeerFloodError，已停止全部发送。"
+                    "这是账号级的发送限制，先别再发，等冷却后再手动重启程序。",
+                )
                 return SendOutcome("failed", error="PeerFloodError", attempts=attempts, permanent=True)
 
             except PERMANENT_ERRORS as exc:
@@ -807,6 +1023,10 @@ class Sender:
                 )
                 self.stats.failed += 1
                 self.stats.bump(target.id, "failed")
+                # 这条根本没送出去，把额度占位退回去，别让坏目标吃掉当天配额
+                await self._release_budget(as_repost=as_repost, target=target)
+                if isinstance(exc, WRITE_FORBIDDEN_ERRORS):
+                    await self._handle_write_forbidden(target, exc)
                 return SendOutcome(
                     "failed",
                     error=f"{reason}: {exc}" + (f" | {note}" if note else ""),

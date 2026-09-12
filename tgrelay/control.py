@@ -118,7 +118,16 @@ class RuntimeControl:
                 for message in (self.reposter.messages if self.reposter else [])
             ],
             "stats": self.reposter.stats.as_dict() if self.reposter else None,
-            "running": bool(self.reposter and self.reposter._task and not self.reposter._task.done()),
+            "running": bool(self.reposter and self.reposter.running),
+        }
+        # 账号级限制的现场信息：给面板「账号自检」和状态页用
+        report["account"] = {
+            "breaker": self.sender.breaker.reason if self.sender.breaker.tripped else "",
+            "write_forbidden": self.sender.write_forbidden.blocked_targets(),
+            "alerts": [
+                {"level": level, "text": text}
+                for level, text in self.sender.alerts.recent(5)
+            ],
         }
         return report
 
@@ -480,11 +489,53 @@ class RuntimeControl:
         ok, bad = await self.reposter.run_cycle()
         return {"sent": ok, "skipped_or_failed": bad, "stats": self.reposter.stats.as_dict()}
 
+    async def start_repost(self) -> dict[str, Any]:
+        """启动（或**重新**启动）定时重发。
+
+        这是"停止"的对偶操作，必须存在：早期版本只能停不能开，
+        面板上点一下"停止重发"就只能重启进程才能恢复。
+
+        这里会顺手清掉熔断和「禁止发言」冷板凳 —— 因为能点这个按钮，
+        就意味着人已经确认"账号没问题了"（通常刚查过 @SpamBot 或申诉成功）。
+        如果其实还有问题，下一个周期会立刻再次熔断，不会白跑。
+        """
+        if self.reposter is None:
+            raise ControlError("当前进程没有重发组件（启动时没带 --repost/--repost-only）")
+        if not self.reposter.messages:
+            await self.reposter.load_messages()
+        self.sender.breaker.reset()
+        self.sender.write_forbidden.clear_all()
+        options = await self.set_repost_options(enabled=True)
+        self.reposter.start()
+        return {"started": True, **options}
+
+    async def check_account(self) -> dict[str, Any]:
+        """问 @SpamBot：这个号现在有没有被 Telegram 限制。"""
+        limited, detail = await self.sender.account_status()
+        if limited is False:
+            # 限制确实解除了，把因为限制而留下的刹车松开
+            self.sender.breaker.reset()
+            self.sender.write_forbidden.clear_all()
+        return {
+            "limited": limited,
+            "detail": detail,
+            "message": {
+                True: "账号仍在被限制：先申诉并等待，解除前不要发送。",
+                False: "账号没有被限制，可以正常发送。",
+                None: "没能从 @SpamBot 拿到明确结论，请自行打开 @SpamBot 看。",
+            }[limited],
+        }
+
     def stop_repost(self) -> dict[str, Any]:
         if self.reposter is None:
             raise ControlError("当前进程没有启用重发")
+        # 连 enabled 一起落盘：否则下次重启（含服务器断电重启）会自己又开始发
+        self.config = replace(
+            self.config, repost=replace(self.config.repost, enabled=False)
+        )
+        self._persist_repost()
         self.reposter._stop.set()
-        return {"stopping": True}
+        return {"stopping": True, "enabled": False}
 
     # ---------------- 诊断 ----------------
 

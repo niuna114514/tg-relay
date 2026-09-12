@@ -254,13 +254,17 @@ class Reposter:
                     bad += 1
                     self.stats.failed += 1
                     self.stats.last_error = outcome.error
-                    if outcome.permanent:
-                        log.error(
-                            "repost -> %s 永久失败，本轮后续素材跳过该目标：%s",
-                            target.display,
-                            outcome.error,
-                        )
-                        chosen = [item for item in chosen if item.id != target.id]
+                # permanent 表示"这个目标本轮不可能成功"：额度用完、账号/群被限制、
+                # 目标被停发……不管是 failed 还是 skipped，都没必要再拿后面的素材去撞，
+                # 直接把它从本轮里摘掉。摘掉之后还有 ok、所以周期数照常累加。
+                if outcome.permanent and outcome.status != "sent":
+                    log.warning(
+                        "repost -> %s 本轮不再尝试（%s）：%s",
+                        target.display,
+                        outcome.status,
+                        outcome.error,
+                    )
+                    chosen = [item for item in chosen if item.id != target.id]
         if ok:
             self.stats.cycles += 1
         return (ok, bad)
@@ -302,8 +306,21 @@ class Reposter:
 
     # ---------------- 生命周期 ----------------
 
+    @property
+    def running(self) -> bool:
+        """循环是不是真的在跑（面板/Bot 靠它显示按钮该是"启动"还是"停止"）。"""
+        return self._task is not None and not self._task.done()
+
     def start(self) -> None:
-        if self._task is None:
+        """启动（或**重新**启动）重发循环。
+
+        这里必须清掉 `_stop`：早期版本只在 `_task is None` 时创建任务，
+        于是 `/stop` 之后 `_stop` 永远保持置位，再调 `start()` 也只是
+        建了一个立刻退出的任务 —— 面板上的"停止"变成了单向操作，
+        除了重启进程没有别的办法恢复（真实踩过）。
+        """
+        self._stop.clear()
+        if not self.running:
             self._task = asyncio.create_task(self.run_forever(), name="reposter")
 
     async def stop(self) -> None:
