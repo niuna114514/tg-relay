@@ -37,6 +37,7 @@ from .config_store import ConfigStore
 from .db import Store
 from .engine import RelayEngine
 from .reposter import Reposter
+from .risk import assess, worst_level
 from .sender import ConfigProblem, Sender
 
 log = logging.getLogger("tgrelay.control")
@@ -103,20 +104,37 @@ class RuntimeControl:
             "premium": self.config.premium,
             "proxy": getattr(self.config.proxy, "safe_url", None),
         }
+        configured = list(self.config.repost.message_ids())
+        loaded = list(self.reposter.messages) if self.reposter else []
+        counts = self.store.repost_counts()
+        # 素材表：优先显示**真正加载到的**消息（有正文预览）；
+        # 重发没启动时 Reposter 不会去拉素材，这时 loaded 是空的 ——
+        # 如果直接把空列表报给面板，界面会显示"素材 0 条"，
+        # 看起来像配置丢了（实际 config 里还好好地写着）。所以退回用配置里的 ID，
+        # 并标上 loaded=False 让界面能说清"还没加载"。
+        materials = [
+            {
+                "msg_id": int(getattr(message, "id", 0)),
+                "preview": (getattr(message, "message", None) or "")[:60],
+                "posted": counts.get(int(getattr(message, "id", 0)), 0),
+                "loaded": True,
+            }
+            for message in loaded
+        ]
+        if not materials and configured:
+            materials = [
+                {"msg_id": int(msg_id), "preview": "", "posted": counts.get(int(msg_id), 0), "loaded": False}
+                for msg_id in configured
+            ]
+
         report["repost"] = {
             "enabled": self.config.repost.enabled,
             "interval": self.config.repost.interval,
             "daily_limit": self.config.repost.daily_limit,
             "shuffle": self.config.repost.shuffle,
-            "message_ids": list(self.config.repost.message_ids()),
-            "materials": [
-                {
-                    "msg_id": int(getattr(message, "id", 0)),
-                    "preview": (getattr(message, "message", None) or "")[:60],
-                    "posted": self.store.repost_counts().get(int(getattr(message, "id", 0)), 0),
-                }
-                for message in (self.reposter.messages if self.reposter else [])
-            ],
+            "message_ids": configured,
+            "materials": materials,
+            "materials_loaded": bool(loaded),
             "stats": self.reposter.stats.as_dict() if self.reposter else None,
             "running": bool(self.reposter and self.reposter.running),
         }
@@ -127,6 +145,15 @@ class RuntimeControl:
             "alerts": [
                 {"level": level, "text": text}
                 for level, text in self.sender.alerts.recent(5)
+            ],
+        }
+        # 发送节奏体检（2026-09-12 号被限制的复盘产物）
+        risks = assess(self.config)
+        report["risk"] = {
+            "level": worst_level(risks),
+            "items": [
+                {"level": risk.level, "title": risk.title, "detail": risk.detail}
+                for risk in risks
             ],
         }
         return report

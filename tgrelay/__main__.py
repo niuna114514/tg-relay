@@ -48,6 +48,7 @@ from .db import Store
 from .engine import RelayEngine
 from .listener import ManagedListener, build_client, catch_up
 from .reposter import Reposter
+from .risk import assess, summarize
 from .sender import ConfigProblem, PeerFloodBreaker, Sender
 
 log = logsetup.get("tgrelay.main")
@@ -342,6 +343,15 @@ async def run(args: argparse.Namespace) -> int:
             log.warning("载入会话列表失败（继续尝试）：%s", exc)
 
         log.info("额度分配：%s", sender.pacer.describe_limits(config.targets))
+
+        # 发送节奏体检：把"什么配法会再次被限制"讲在启动日志里
+        risks = assess(config)
+        log.info(summarize(risks))
+        for risk in risks:
+            if risk.level == "danger":
+                log.warning("%s", risk.render())
+            else:
+                log.info("%s", risk.render())
 
         ok, problems = await self_check(sender, config)
         for line in ok:

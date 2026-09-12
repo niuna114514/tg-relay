@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -492,6 +493,63 @@ def test_account_check_releases_brakes_when_clear(wired) -> None:
 
 
 # --------------------------------------------------------------------------
+# 素材显示：重发没启动时不能让界面看起来像"配置丢了"
+# --------------------------------------------------------------------------
+
+
+def test_materials_fall_back_to_configured_ids(wired) -> None:
+    """Reposter 没加载素材时（重发关闭），配置里的 ID 仍要报给界面。
+
+    否则面板显示「素材 0 条」，看着像素材配置被清空了 —— 实际 config 里还写着。
+    """
+    http, control, *_ = wired
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    control.reposter.messages = []          # 模拟"还没加载"
+    control.config = replace(
+        control.config, repost=replace(control.config.repost, ids=(6, 7))
+    )
+
+    data = http.get("/api/stats", headers=auth).json()
+
+    assert data["repost"]["materials_loaded"] is False
+    assert [m["msg_id"] for m in data["repost"]["materials"]] == [6, 7]
+    assert all(m["loaded"] is False for m in data["repost"]["materials"])
+    assert data["repost"]["message_ids"] == [6, 7]
+
+
+def test_materials_prefer_loaded_messages(wired) -> None:
+    """加载到了就用真实消息（有正文预览）。"""
+    http, control, *_ = wired
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    assert control.reposter.messages, "fixture 里应该已经塞了一条素材"
+
+    data = http.get("/api/stats", headers=auth).json()
+
+    assert data["repost"]["materials_loaded"] is True
+    assert data["repost"]["materials"][0]["loaded"] is True
+    assert data["repost"]["materials"][0]["preview"]
+
+
+# --------------------------------------------------------------------------
+# 发送节奏体检要能传到界面上
+# --------------------------------------------------------------------------
+
+
+def test_stats_include_risk_section(wired) -> None:
+    http, control, *_ = wired
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    control.config = replace(
+        control.config,
+        targets=(replace(control.config.targets[0], interval=(30.0, 30.0)),),
+    )
+
+    data = http.get("/api/stats", headers=auth).json()
+
+    assert data["risk"]["level"] == "danger"
+    assert any("群发送间隔" in item["title"] for item in data["risk"]["items"])
+
+
+# --------------------------------------------------------------------------
 # 限速
 # --------------------------------------------------------------------------
 
@@ -515,3 +573,32 @@ def test_patch_rate_rejects_zero(wired) -> None:
     http, *_ = wired
     auth = {"Authorization": f"Bearer {TOKEN}"}
     assert http.patch("/api/rate", json={"global_per_minute": 0}, headers=auth).status_code == 400
+
+
+# --------------------------------------------------------------------------
+# 页面里的 JS 转义
+#
+# 面板是塞在 Python 的 **raw 字符串**（_PAGE = r"""…"""）里的，
+# 所以 JS 里的换行必须写成 '\n'（一个反斜杠）。
+# 写成 '\\n' 的话浏览器拿到的是"反斜杠 + n"两个字符，
+# 日志面板会把所有行挤成一行、还带着可见的 \n —— 这个 bug 真的存在过。
+# --------------------------------------------------------------------------
+
+
+def test_page_js_uses_single_backslash_newlines(wired) -> None:
+    http, *_ = wired
+    body = http.get("/", headers={"Authorization": f"Bearer {TOKEN}"}).text
+
+    assert "join('\\n')" in body, "日志应该用真正的换行拼接"
+    assert "join('\\\\n')" not in body, "出现双反斜杠 = 浏览器看到的是字面量 \\n"
+
+
+def test_page_has_repost_toggle_and_account_card(wired) -> None:
+    http, *_ = wired
+    body = http.get("/", headers={"Authorization": f"Bearer {TOKEN}"}).text
+
+    assert 'id="repostToggle"' in body
+    assert 'id="account"' in body
+    assert 'id="acctBtn"' in body
+    assert "/api/repost/start" in body
+    assert "/api/account/check" in body

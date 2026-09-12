@@ -687,9 +687,17 @@ function render(report){
   ].map(([k,v])=>`<div class="kv"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
 
   const mats = rp.materials || [];
-  document.getElementById('materials').innerHTML = mats.length ? mats.map(m=>
-    `<tr><td class="mono">${m.msg_id}</td><td>${esc(m.preview)||'<span class="empty">(非文本)</span>'}</td><td>${m.posted}</td></tr>`
+  // 重发没启动时 Reposter 不会去拉素材，这时显示的是**配置里的 ID**（还没取到正文），
+  // 必须说清楚，否则看起来像"素材配置丢了"
+  const notLoaded = rp.materials_loaded === false;
+  let matRows = mats.length ? mats.map(m=>
+    `<tr><td class="mono">${m.msg_id}</td><td>${esc(m.preview) || (m.loaded === false ? '<span class="empty">（重发未启动，正文还没取回）</span>' : '<span class="empty">(非文本)</span>')}</td><td>${m.posted}</td></tr>`
   ).join('') : '<tr><td colspan="3" class="empty">还没有素材</td></tr>';
+  if (notLoaded && mats.length) {
+    matRows += '<tr><td colspan="3" class="empty">以上是配置（repost.ranges / ids）里的素材 ID；'
+             + '点「启动重发」会去源频道取回正文。</td></tr>';
+  }
+  document.getElementById('materials').innerHTML = matRows;
 
   // 「停止/启动重发」按钮跟着真实运行状态走，不靠人记
   const tg = document.getElementById('repostToggle');
@@ -711,14 +719,14 @@ function render(report){
     `<div class="kv"><div class="k">${esc(k)}</div><div class="v" style="${cls==='bad'?'color:var(--bad)':''}">${esc(v)}</div></div>`
   ).join('');
   if (acct.breaker) html += `<div class="empty" style="flex:1 1 100%;color:var(--bad)">${esc(acct.breaker)}</div>`;
-  if (alerts.length) html += `<div class="empty" style="flex:1 1 100%">最近告警：${alerts.map(a=>esc(a.text.split('\\n')[0])).join(' ｜ ')}</div>`;
+  if (alerts.length) html += `<div class="empty" style="flex:1 1 100%">最近告警：${alerts.map(a=>esc(a.text.split('\n')[0])).join(' ｜ ')}</div>`;
   document.getElementById('account').innerHTML = html;
 }
 
 function renderLogs(lines){
   const el = document.getElementById('logs');
   const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-  el.textContent = (lines||[]).join('\\n') || '（暂无日志）';
+  el.textContent = (lines||[]).join('\n') || '（暂无日志）';
   if (atBottom) el.scrollTop = el.scrollHeight;
 }
 
@@ -893,7 +901,7 @@ async function stopRepost(){
   catch(e){ toast(e.message,'err'); }
 }
 async function startRepost(){
-  if (!confirm('启动定时重发？\\n\\n这会同时清掉「熔断」和「禁止发言」的暂停状态。\\n如果账号其实还在被 Telegram 限制，下一个周期会再次熔断（不会白跑）。')) return;
+  if (!confirm('启动定时重发？\n\n这会同时清掉「熔断」和「禁止发言」的暂停状态。\n如果账号其实还在被 Telegram 限制，下一个周期会再次熔断（不会白跑）。')) return;
   try{ const r = await api('POST','/api/repost/start'); toast(`重发已启动：每轮间隔 ${r.interval}s，日额度 ${r.daily_limit}`,'ok'); refresh(); }
   catch(e){ toast(e.message,'err'); }
 }
@@ -902,7 +910,7 @@ async function checkAccount(){
   if (btn) { btn.disabled = true; btn.textContent = '正在问 @SpamBot…'; }
   try{
     const r = await api('POST','/api/account/check');
-    toast(r.message + '\\n' + (r.detail||'').slice(0,200), r.limited===false?'ok':'err');
+    toast(r.message + '\n' + (r.detail||'').slice(0,200), r.limited===false?'ok':'err');
     refresh();
   }catch(e){ toast(e.message,'err'); }
   finally{ if (btn) { btn.disabled = false; btn.textContent = '账号自检'; } }

@@ -378,6 +378,18 @@ class BotController:
                     )
             elif limit and used >= limit:
                 lines.append("⚠️ <i>今日重发额度已用满，今天不会再发</i>")
+
+        # 发送节奏体检：把"什么配法会再次被限制"直接摆在状态里
+        risks = snapshot.get("risk") or {}
+        items = risks.get("items") or []
+        if items:
+            lines.append("")
+            lines.append(
+                "🚨 <b>发送节奏体检</b>" if risks.get("level") == "danger" else "⚠️ <b>发送节奏体检</b>"
+            )
+            for item in items:
+                tag = "🔴" if item["level"] == "danger" else "🟡"
+                lines.append(f"{tag} <b>{html.escape(item['title'])}</b>\n<i>{html.escape(item['detail'])}</i>")
         return "\n".join(lines)
 
     async def _cmd_targets(self, _: str) -> str:
