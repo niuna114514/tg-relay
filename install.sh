@@ -34,7 +34,7 @@
 #
 #  一行命令安装（不需要 git clone，也不需要先有代码）：
 #
-#      bash <(curl -fsSL https://raw.githubusercontent.com/niuma1337sys/tg-relay/main/install.sh)
+#      bash <(curl -fsSL https://raw.githubusercontent.com/niuna114514/tg-relay/main/install.sh)
 #
 #      脚本会自己去下载源码压缩包（DEFAULT_TARBALL）。换仓库只改脚本顶部那两行。
 #      没有 curl 进程替换的环境（比如某些精简系统）可以：
@@ -72,8 +72,8 @@ PIP_MIRROR="${TG_PIP_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 # 源码地址（一行命令安装时用）。换仓库、换平台（比如 Gitee）只改这两行：
 #   GitHub 压缩包  https://codeload.github.com/<用户>/<仓库>/tar.gz/refs/heads/main
 #   Gitee 压缩包   https://gitee.com/<用户>/<仓库>/repository/archive/main.tar.gz
-DEFAULT_TARBALL="${TG_TARBALL:-https://codeload.github.com/niuma1337sys/tg-relay/tar.gz/refs/heads/main}"
-DEFAULT_SCRIPT_URL="${TG_SCRIPT_URL:-https://raw.githubusercontent.com/niuma1337sys/tg-relay/main/install.sh}"
+DEFAULT_TARBALL="${TG_TARBALL:-https://codeload.github.com/niuna114514/tg-relay/tar.gz/refs/heads/main}"
+DEFAULT_SCRIPT_URL="${TG_SCRIPT_URL:-https://raw.githubusercontent.com/niuna114514/tg-relay/main/install.sh}"
 
 # 配置答案（都可用环境变量覆盖，便于无人值守安装）
 API_ID="${TG_API_ID:-}"

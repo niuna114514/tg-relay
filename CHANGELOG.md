@@ -96,5 +96,5 @@
   对外暴露时走 nginx + TLS + Basic Auth
 - 备份包用 GPG AES256 加密，口令单独存放
 
-[未发布]: https://github.com/niuma1337sys/tg-relay/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/niuma1337sys/tg-relay/tree/v1.0.0
+[未发布]: https://github.com/niuna114514/tg-relay/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/niuna114514/tg-relay/tree/v1.0.0

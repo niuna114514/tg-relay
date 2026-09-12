@@ -1,6 +1,6 @@
 # 协议号 频道 → 多群 转发（保留来源）
 
-[![CI](https://github.com/niuma1337sys/tg-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/niuma1337sys/tg-relay/actions/workflows/ci.yml)
+[![CI](https://github.com/niuna114514/tg-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/niuna114514/tg-relay/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/tests-347-brightgreen.svg)](#-跑测试)
@@ -64,14 +64,14 @@
 **一行命令，不需要 git clone，也不需要先有代码：**
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/niuma1337sys/tg-relay/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/niuna114514/tg-relay/main/install.sh)
 ```
 
 脚本自己会去下载源码压缩包（地址写在脚本顶部 `DEFAULT_TARBALL`，换仓库只改那一行）。
 没有 `bash <(...)` 这种进程替换的环境，可以两步：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/niuma1337sys/tg-relay/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/niuna114514/tg-relay/main/install.sh -o install.sh
 bash install.sh
 ```
 
