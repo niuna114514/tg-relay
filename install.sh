@@ -1036,9 +1036,14 @@ do_install() {
 self_test() {
     banner
     title "自检：生成配置并用 Python 校验"
+    # 用**脚本所在目录**当项目目录，而不是 $APP_DIR：
+    # self-test 要拿"当前这份代码"的解析器去校验生成的配置。
+    # 在 CI 里跑的时候 /opt/tg-relay 根本不存在，用 $APP_DIR 会 cd 失败、
+    # 整个自检假红（第一次把它加进 CI 就是这样）。
+    local project_dir
+    project_dir="$(script_dir)"
     local tmp
     tmp="$(mktemp -d)"
-    local saved_dir="$APP_DIR"
     APP_DIR="$tmp"
     DRY_RUN=no
 
@@ -1059,11 +1064,11 @@ self_test() {
 
     echo
     info "用项目自己的解析器校验："
-    local py="$saved_dir/.venv/bin/python"
+    local py="$project_dir/.venv/bin/python"
     [ -x "$py" ] || py="python3"
-    ( cd "$saved_dir" && "$py" - <<PY
+    ( cd "$project_dir" && "$py" - <<PY
 import sys
-sys.path.insert(0, "${saved_dir}")
+sys.path.insert(0, "${project_dir}")
 from tgrelay.config import load_config
 c = load_config("${tmp}/config.yaml")
 print(f"    ✅ 解析成功")
@@ -1080,7 +1085,6 @@ print("    ✅ 断言全部通过")
 PY
     )
     local rc=$?
-    APP_DIR="$saved_dir"
     rm -rf "$tmp"
     return $rc
 }
