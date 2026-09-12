@@ -3,7 +3,7 @@
 ## 报告漏洞
 
 **请不要开公开的 Issue。** 用 GitHub 的
-[私密漏洞报告](https://github.com/niuma1337sys/telegram-/security/advisories/new)，
+[私密漏洞报告](https://github.com/niuma1337sys/tg-relay/security/advisories/new)，
 或者直接联系仓库作者。
 
 请写清楚：复现步骤、影响范围、你判断的严重程度。我会尽快回复；

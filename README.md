@@ -1,6 +1,6 @@
 # 协议号 频道 → 多群 转发（保留来源）
 
-[![CI](https://github.com/niuma1337sys/telegram-/actions/workflows/ci.yml/badge.svg)](https://github.com/niuma1337sys/telegram-/actions/workflows/ci.yml)
+[![CI](https://github.com/niuma1337sys/tg-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/niuma1337sys/tg-relay/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/tests-347-brightgreen.svg)](#-跑测试)
